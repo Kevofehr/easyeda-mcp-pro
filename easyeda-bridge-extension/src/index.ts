@@ -1166,7 +1166,6 @@ async function dispatch(method: string, params: Record<string, unknown> = {}): P
         footprint: string;
         lcsc: string;
       }>;
-      const allRefs = new Set(comps.map((c) => c.reference));
       const connectedRefs = new Set<string>();
       const connectedPins = new Set<string>();
       const nets = (netlistData || []).map((n) => {
