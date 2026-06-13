@@ -47,7 +47,7 @@ EASYEDA_DEV_BRIDGE=false
 
 # Optional: adjust for your environment
 BRIDGE_HOST=127.0.0.1
-BRIDGE_PORT=18601
+BRIDGE_PORT=49620
 LOG_LEVEL=info
 ```
 

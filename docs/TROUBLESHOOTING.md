@@ -28,11 +28,11 @@ The AI client (e.g. Claude Desktop or Cursor) displays an error: `"Failed to sta
 
 1. **Connect via Menu**: In EasyEDA Pro, verify that you clicked **MCP Bridge** → **Connect** in the menu bar. If connected, the menu should display a checkmark or status indicating active socket connections.
 2. **Extension Permissions**: Go to **Settings** → **Extensions** → **Extension Manager** and make sure **Allow External Interaction** is checked for the MCP Pro Bridge extension. Without this, EasyEDA blocks external WebSocket connections.
-3. **Port Conflict**: The bridge defaults to port `18601`. If it is in use by another application, the extension will fail to bind. Run the doctor tool to diagnose:
+3. **Port Conflict**: The bridge defaults to port `49620`. If it is in use by another application, the extension will fail to bind. Run the doctor tool to diagnose:
    ```bash
    npx easyeda-mcp-pro doctor
    ```
-4. **Port Scan Configuration**: If you changed ports, ensure the server env var `BRIDGE_PORT` or `BRIDGE_PORT_SCAN` aligns with the extension's configured port (default is `18601`).
+4. **Port Scan Configuration**: If you changed ports, ensure the server env var `BRIDGE_PORT` or `BRIDGE_PORT_SCAN` aligns with the extension's configured port (default is `49620`).
 
 ---
 
