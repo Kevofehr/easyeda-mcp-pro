@@ -105,7 +105,8 @@ jobs:
 
       - name: Attach Build Provenance (SLSA + Sigstore)
         if: ${{ env.RELEASE_RUN == 'true' }}
-        uses: actions/attest-build-provenance@v2
+        # actions/attest-build-provenance v2.4.0
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
         with:
           subject-path: |
             dist/**
