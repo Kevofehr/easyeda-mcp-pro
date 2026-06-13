@@ -156,7 +156,7 @@ export async function createDoctorReport(
   const setup = getLocalSetupInfo(packageRoot);
   const env = parseCliEnv();
   const bridgeHost = env.config?.BRIDGE_HOST ?? '127.0.0.1';
-  const ports = parsePortScanSpec(env.config?.BRIDGE_PORT_SCAN ?? '18601');
+  const ports = parsePortScanSpec(env.config?.BRIDGE_PORT_SCAN ?? '49620');
   const bridgePorts = [];
 
   for (const port of ports.slice(0, 20)) {
