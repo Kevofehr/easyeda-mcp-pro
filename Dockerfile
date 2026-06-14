@@ -7,7 +7,7 @@ RUN corepack enable && corepack prepare pnpm@11.5.1 --activate
 WORKDIR /app
 
 # Copy root workspace and package manifests
-COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
+COPY .npmrc pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 COPY easyeda-bridge-extension/package.json ./easyeda-bridge-extension/
 
 # Install dependencies (including devDependencies for build)
