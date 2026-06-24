@@ -7,9 +7,6 @@ import { type EnvConfig } from '../../config/env.js';
 import { SERVER_VERSION } from '../../config/version.js';
 import { getLogger } from '../../utils/logger.js';
 
-/** Known loopback host values used for default origin policy. */
-const LOOPBACK_ORIGINS = new Set(['http://127.0.0.1', 'http://localhost', 'http://::1', 'null']);
-
 export interface HttpTransportInstance {
   app: Express;
   transport: StreamableHTTPServerTransport;
@@ -137,6 +134,42 @@ export function isLoopback(host: string): boolean {
   return host === '127.0.0.1' || host === 'localhost' || host === '::1';
 }
 
+function hostWithoutPort(hostHeader: string): string {
+  if (hostHeader.startsWith('[')) {
+    const end = hostHeader.indexOf(']');
+    return end >= 0 ? hostHeader.slice(1, end) : hostHeader;
+  }
+  return hostHeader.split(':')[0] ?? hostHeader;
+}
+
+function isAllowedLoopbackOrigin(origin: string): boolean {
+  if (origin === 'null') return true;
+  try {
+    const url = new URL(origin);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && isLoopback(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function validateHostHeader(config: EnvConfig, host: string | undefined): boolean {
+  if (!host) return true;
+  const hostname = hostWithoutPort(host).toLowerCase();
+  const configuredHost = config.HTTP_HOST.toLowerCase();
+
+  if (isLoopback(config.HTTP_HOST)) {
+    return isLoopback(hostname);
+  }
+
+  const expectedHost = `${config.HTTP_HOST}:${config.HTTP_PORT}`;
+  return (
+    host === expectedHost ||
+    host === config.HTTP_HOST ||
+    hostname === configuredHost ||
+    isLoopback(hostname)
+  );
+}
+
 /**
  * Parse a comma-separated origin allowlist string into a Set.
  * Empty string returns an empty set. '*' returns a set containing '*' only.
@@ -170,24 +203,12 @@ export function createOriginValidator(config: EnvConfig) {
     // On non-loopback, verify the Host header matches our configured bind address.
     // This prevents an attacker from pointing a DNS name at our IP and bypassing
     // browser same-origin policy.
-    if (!loopbackMode) {
-      const host = req.headers.host;
-      if (host) {
-        const expectedHost = `${config.HTTP_HOST}:${config.HTTP_PORT}`;
-        const expectedHostWithoutPort = config.HTTP_HOST;
-        if (
-          host !== expectedHost &&
-          host !== expectedHostWithoutPort &&
-          !host.startsWith('127.0.0.1') &&
-          !host.startsWith('localhost')
-        ) {
-          res.status(400).json({
-            error: 'Invalid Host header',
-            code: 'host_mismatch',
-          });
-          return;
-        }
-      }
+    if (!validateHostHeader(config, req.headers.host)) {
+      res.status(400).json({
+        error: 'Invalid Host header',
+        code: 'host_mismatch',
+      });
+      return;
     }
 
     // ── 2. Origin validation ──────────────────────────────────────────────
@@ -209,7 +230,7 @@ export function createOriginValidator(config: EnvConfig) {
     // On loopback, accept known localhost origins and the legacy CORS_ORIGIN.
     if (loopbackMode) {
       const legacyMatch = config.CORS_ORIGIN && origin === config.CORS_ORIGIN;
-      if (LOOPBACK_ORIGINS.has(origin) || legacyMatch) {
+      if (isAllowedLoopbackOrigin(origin) || legacyMatch) {
         res.setHeader('Access-Control-Allow-Origin', origin);
         next();
         return;
@@ -267,11 +288,12 @@ export function createHttpTransport(config: EnvConfig): HttpTransportInstance {
 
   app.use(createRateLimiter(60_000, config.HTTP_RATE_LIMIT_MAX));
 
-  app.use(validateOAuthToken(config));
-
-  // Origin validation and CORS (must come before route handlers).
+  // Origin validation and CORS preflight must run before OAuth so browser
+  // preflight can complete without a bearer token while still enforcing origin.
   app.use(createOriginValidator(config));
   app.use(handleCorsPreflight);
+
+  app.use(validateOAuthToken(config));
 
   app.post('/mcp', (req, res) => {
     transport.handleRequest(req, res, req.body);
