@@ -45,7 +45,7 @@ For advanced configurations, manual instructions, and specific clients, see [Ins
 
 ## Overview
 
-easyeda-mcp-pro is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that bridges AI assistants with hardware design workflows in EasyEDA Pro. It exposes 41 profile-gated MCP tools for schematic inspection and editing, controlled EasyEDA Pro API calls, BOM management, design rule checks, PCB board analysis, fabrication exports, and supplier integration.
+easyeda-mcp-pro is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that bridges AI assistants with hardware design workflows in EasyEDA Pro. It exposes up to 51 profile-gated MCP tools for schematic inspection and editing, controlled EasyEDA Pro API calls, BOM management, design rule checks, PCB board analysis, fabrication exports, and supplier integration.
 
 The server connects to EasyEDA Pro via a WebSocket bridge extension, enabling real-time access to open project data. It integrates with JLCPCB, LCSC, Mouser, and DigiKey for BOM sourcing and pricing.
 
@@ -617,7 +617,7 @@ pnpm typecheck             # TypeScript
 pnpm lint                  # ESLint
 
 # Test
-pnpm test                  # Vitest (120+ tests across 18+ files)
+pnpm test                  # Vitest (497 tests across 32 files)
 pnpm test:coverage         # With coverage report
 
 # Golden E2E fixture smoke tests are included in `pnpm test`
@@ -665,7 +665,7 @@ src/
 │   └── transports/
 │       └── http.ts          # HTTP/Streamable HTTP transport
 ├── storage/                 # Node.js sqlite storage (cache, artifacts)
-├── tools/                   # 41 MCP tool definitions (6 groups)
+├── tools/                   # 51 MCP tool definitions (6 groups)
 │   ├── register.ts, registry.ts, types.ts
 │   ├── L0_diagnostics.ts, L1_schematic.ts, L1_bom.ts
 │   ├── L1_drc_erc.ts, L1_board.ts, L1_export.ts

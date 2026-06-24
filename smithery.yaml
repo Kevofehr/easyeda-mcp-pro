@@ -20,7 +20,7 @@ startCommand:
           dev = full + bridge probe and component inspection tools.
       BRIDGE_PORT:
         type: number
-        default: 18601
+        default: 49620
         title: Bridge Port
         description: >-
           WebSocket port for the EasyEDA Pro bridge extension connection.
@@ -43,7 +43,7 @@ startCommand:
       args: ['-y', 'easyeda-mcp-pro@latest'],
       env: {
         TOOL_PROFILE: config.TOOL_PROFILE || 'core',
-        BRIDGE_PORT: String(config.BRIDGE_PORT || 18601),
+        BRIDGE_PORT: String(config.BRIDGE_PORT || 49620),
         LOG_LEVEL: config.LOG_LEVEL || 'info'
       }
     })
