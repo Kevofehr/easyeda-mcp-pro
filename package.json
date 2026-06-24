@@ -54,6 +54,7 @@
     "typecheck": "tsc --noEmit",
     "typecheck:extension": "pnpm --filter @easyeda-mcp-pro/bridge-extension typecheck",
     "lint": "eslint .",
+    "lint:tools": "tsx scripts/lint-tool-metadata.mts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",

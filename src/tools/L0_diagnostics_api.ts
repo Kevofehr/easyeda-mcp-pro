@@ -29,7 +29,7 @@ function registerDiagnosticsApi(
     name: 'easyeda_api_call',
     title: 'Call EasyEDA API',
     description:
-      'Call a documented EasyEDA class method by path, for example SCH_PrimitiveWire.getAll. This is not raw JavaScript execution.',
+      'Controlled call to a documented EasyEDA class method by path, for example SCH_PrimitiveWire.getAll. This is not raw JavaScript execution.',
     profile: 'full',
     evidence: ['runtime-probe', 'pro-api-types', 'official-docs'],
     risk: 'high',

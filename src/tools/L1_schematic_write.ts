@@ -220,10 +220,7 @@ function registerSchematicWriteTools(
     name: 'easyeda_schematic_create_net_flag',
     title: 'Create net flag',
     description:
-      'Place a net flag (net label) on the schematic canvas at specified coordinates. ' +
-      'A net flag declares a named net on a wire segment, creating real SCH_Net connectivity ' +
-      'in the EasyEDA Pro netlist. Unlike easyeda_schematic_add_wire (which creates graphical wires ' +
-      'that may not appear in SCH_Net/SCH_Netlist), this tool actually populates the netlist.',
+      'Create a named schematic net flag at specified coordinates. This controlled write declares real SCH_Net connectivity in the EasyEDA Pro netlist.',
     profile: 'core',
     evidence: ['inferred'],
     risk: 'medium',
