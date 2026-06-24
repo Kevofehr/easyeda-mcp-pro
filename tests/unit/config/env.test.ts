@@ -6,6 +6,7 @@ describe('EnvSchema', () => {
     const result = EnvSchema.parse({});
     expect(result.NODE_ENV).toBe('development');
     expect(result.TOOL_PROFILE).toBe('core');
+    expect(result.TOOL_SCOPES).toBe('');
     expect(result.TRANSPORT).toBe('stdio');
     expect(result.BRIDGE_HOST).toBe('127.0.0.1');
     expect(result.BRIDGE_PORT).toBe(49620);

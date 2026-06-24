@@ -8,6 +8,8 @@ All configuration is managed using environment variables. When running locally f
 
 The active tool set is gated by the `TOOL_PROFILE` environment variable.
 
+`TOOL_SCOPES` can optionally add a second capability allowlist. Leave it empty for the default local all-capabilities mode, or set comma/space separated scopes such as `schematic:read,bom:read,export:write`.
+
 | Profile          | Level   | Purpose                                                                                                                            |
 | ---------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | `core` (default) | L0 + L1 | Standard read-only and inspection tools (schematic components, nets, stackup, layers, export Gerbers).                             |
@@ -19,7 +21,8 @@ Configure this in your client environment configuration:
 
 ```json
 "env": {
-  "TOOL_PROFILE": "pro"
+  "TOOL_PROFILE": "pro",
+  "TOOL_SCOPES": "schematic:read,bom:read,checks:read,export:write"
 }
 ```
 

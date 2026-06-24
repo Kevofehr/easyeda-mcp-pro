@@ -15,6 +15,7 @@ export const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent']).default('info'),
   TOOL_PROFILE: z.enum(['core', 'pro', 'full', 'dev', 'experimental']).default('core'),
+  TOOL_SCOPES: z.string().default(''),
   MCP_PROTOCOL_VERSION: z.string().default('2025-11-25'),
 
   TRANSPORT: z.enum(['stdio', 'http']).default('stdio'),
@@ -94,6 +95,7 @@ const PROJECT_VAR_PREFIXES = [
   'NODE_ENV',
   'LOG_LEVEL',
   'TOOL_PROFILE',
+  'TOOL_',
   'MCP_PROTOCOL_VERSION',
   'TRANSPORT',
   'HTTP_',

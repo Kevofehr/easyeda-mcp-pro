@@ -376,6 +376,7 @@ Copy `.env.example` to `.env` and edit. All variables have safe defaults — onl
 | `NODE_ENV`             | `development` | Set to `production` in production                                            |
 | `LOG_LEVEL`            | `info`        | Pino log level: `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent` |
 | `TOOL_PROFILE`         | `core`        | Tool set: `core`, `pro`, `full`, `dev`, `experimental`                       |
+| `TOOL_SCOPES`          | empty         | Optional capability allowlist such as `schematic:read,bom:read`              |
 | `MCP_PROTOCOL_VERSION` | `2025-11-25`  | MCP protocol version string                                                  |
 | `TRANSPORT`            | `stdio`       | Server transport: `stdio` (default) or `http`                                |
 
@@ -464,7 +465,9 @@ See `.env.example` for the complete list of configuration variables.
 
 ## MCP Tools
 
-The server currently registers 41 tools. Tools are filtered by the active `TOOL_PROFILE`: `core` exposes the normal workflow tools, `pro` adds manufacturing exports, `full` adds controlled documented EasyEDA API calls, and `dev` adds runtime probes for debugging.
+The server currently registers up to 51 profile-gated tools. Tools are filtered by the active `TOOL_PROFILE`: `core` exposes the normal workflow tools, `pro` adds manufacturing exports, `full` adds controlled documented EasyEDA API calls, and `dev` adds runtime probes for debugging.
+
+Capability scopes add a second authorization layer when `TOOL_SCOPES` is set. Leave it empty for the default local all-capabilities mode, or restrict it with comma/space separated scopes such as `diagnostics:read`, `schematic:read`, `schematic:write`, `bom:read`, `bom:source`, `checks:read`, `pcb:read`, `pcb:write`, `export:write`, `api:read`, `api:write`, and `bridge:execute`.
 
 ### L0 — Diagnostics (core)
 

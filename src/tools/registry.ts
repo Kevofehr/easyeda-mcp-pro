@@ -13,6 +13,7 @@ export const ErrorCodes = {
   TOOL_NOT_FOUND: 'ERR_TOOL_NOT_FOUND',
   INVALID_INPUT: 'ERR_INVALID_INPUT',
   TOOL_OUTPUT_INVALID: 'ERR_TOOL_OUTPUT_INVALID',
+  FORBIDDEN_SCOPE: 'ERR_FORBIDDEN_SCOPE',
 } as const;
 
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];
@@ -22,6 +23,68 @@ export interface StructuredError {
   message: string;
   /** Optional structured details for the client */
   details?: Record<string, unknown>;
+}
+
+const READ_ALL_SCOPE = 'easyeda:read';
+const WRITE_ALL_SCOPE = 'easyeda:write';
+
+function parseToolScopes(value: unknown): Set<string> | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === '*') return null;
+
+  return new Set(
+    trimmed
+      .split(/[\s,]+/)
+      .map((scope) => scope.trim())
+      .filter(Boolean),
+  );
+}
+
+export function getRequiredToolScopes(tool: ToolDefinition): string[] {
+  if (tool.name === 'easyeda_execute') return ['bridge:execute'];
+  if (tool.name === 'easyeda_api_call') return [tool.confirmWrite ? 'api:write' : 'api:read'];
+  if (tool.name === 'easyeda_api_inventory' || tool.name === 'easyeda_component_probe') {
+    return ['api:read'];
+  }
+
+  switch (tool.group) {
+    case 'diagnostics':
+      return ['diagnostics:read'];
+    case 'schematic':
+      return [tool.confirmWrite ? 'schematic:write' : 'schematic:read'];
+    case 'bom':
+      return [tool.name.includes('sourcing') ? 'bom:source' : 'bom:read'];
+    case 'drc-erc':
+      return ['checks:read'];
+    case 'board':
+    case 'pcb-constraints':
+      return ['pcb:read'];
+    case 'pcb-write':
+      return ['pcb:write'];
+    case 'export':
+      return ['export:write'];
+    default:
+      return [tool.confirmWrite ? WRITE_ALL_SCOPE : READ_ALL_SCOPE];
+  }
+}
+
+function hasRequiredToolScopes(
+  allowedScopes: Set<string> | null,
+  requiredScopes: string[],
+): boolean {
+  if (allowedScopes === null) return true;
+  if (allowedScopes.has('*')) return true;
+  if (requiredScopes.some((scope) => allowedScopes.has(scope))) return true;
+  if (
+    requiredScopes.some((scope) => scope.endsWith(':write')) &&
+    allowedScopes.has(WRITE_ALL_SCOPE)
+  ) {
+    return true;
+  }
+  return (
+    allowedScopes.has(READ_ALL_SCOPE) && requiredScopes.every((scope) => scope.endsWith(':read'))
+  );
 }
 
 /**
@@ -138,6 +201,21 @@ export class ToolRegistry {
                   details: { toolName: tool.name, toolGroup: tool.group, risk: tool.risk },
                 });
               }
+            }
+
+            // ── Capability scope gate ────────────────────────────
+            const allowedScopes = parseToolScopes(context.config.TOOL_SCOPES);
+            const requiredScopes = getRequiredToolScopes(tool);
+            if (!hasRequiredToolScopes(allowedScopes, requiredScopes)) {
+              return structuredErrorResponse({
+                errorCode: ErrorCodes.FORBIDDEN_SCOPE,
+                message: `Tool "${tool.name}" requires one of: ${requiredScopes.join(', ')}.`,
+                details: {
+                  toolName: tool.name,
+                  requiredScopes,
+                  configuredScopes: allowedScopes ? Array.from(allowedScopes) : ['*'],
+                },
+              });
             }
 
             // ── Parse & execute ───────────────────────────────────────

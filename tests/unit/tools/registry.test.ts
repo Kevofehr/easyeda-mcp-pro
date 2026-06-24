@@ -232,6 +232,62 @@ describe('ToolRegistry', () => {
     });
   });
 
+  describe('capability scope gate', () => {
+    it('should allow all tools when TOOL_SCOPES is empty', async () => {
+      const tool = createMockTool('scope_default_allow', 'core');
+      registry.register(tool);
+
+      const { server, handlers } = mockMcpServer();
+      registry.registerAllOnServer(server as any, mockContext());
+
+      const response = await handlers.get('scope_default_allow')!({});
+      expect(response.isError).toBeFalsy();
+      expect(response.structuredContent).toMatchObject({ ok: true });
+    });
+
+    it('should reject a tool when configured scopes do not include the required capability', async () => {
+      const tool = createMockTool('scope_denied_write', 'core', {
+        group: 'schematic',
+        confirmWrite: true,
+        risk: 'high',
+      });
+      registry.register(tool);
+
+      const { server, handlers } = mockMcpServer();
+      registry.registerAllOnServer(
+        server as any,
+        mockContext({ config: { ...mockContext().config, TOOL_SCOPES: 'schematic:read' } }),
+      );
+
+      const response = await handlers.get('scope_denied_write')!({ confirmWrite: true });
+      expect(response.isError).toBe(true);
+      expect(response.content[0].text).toContain(ErrorCodes.FORBIDDEN_SCOPE);
+      expect(response.structuredContent).toMatchObject({
+        errorCode: ErrorCodes.FORBIDDEN_SCOPE,
+        details: { requiredScopes: ['schematic:write'] },
+      });
+    });
+
+    it('should allow a tool when configured scopes include the required capability', async () => {
+      const tool = createMockTool('scope_allowed_write', 'core', {
+        group: 'schematic',
+        confirmWrite: true,
+        risk: 'high',
+      });
+      registry.register(tool);
+
+      const { server, handlers } = mockMcpServer();
+      registry.registerAllOnServer(
+        server as any,
+        mockContext({ config: { ...mockContext().config, TOOL_SCOPES: 'schematic:write' } }),
+      );
+
+      const response = await handlers.get('scope_allowed_write')!({ confirmWrite: true });
+      expect(response.isError).toBeFalsy();
+      expect(response.structuredContent).toMatchObject({ ok: true });
+    });
+  });
+
   describe('structured error codes', () => {
     it('should return ERR_INVALID_INPUT on ZodError', async () => {
       const tool = createMockTool('zod_fail', 'core', {
