@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import { EnvSchema } from '../../../../src/config/env.js';
+import { SERVER_VERSION } from '../../../../src/config/version.js';
 import {
   createHttpTransport,
   createOriginValidator,
@@ -137,7 +138,7 @@ describe('createHttpTransport', () => {
       expect(res.status).toBe(200);
       const body = (await res.json()) as { status: string; version: string };
       expect(body.status).toBe('ok');
-      expect(body.version).toBe('0.4.0');
+      expect(body.version).toBe(SERVER_VERSION);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

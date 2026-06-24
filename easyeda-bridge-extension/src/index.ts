@@ -1686,7 +1686,7 @@ function sendHandshake(): void {
     protocol: BRIDGE_PROTOCOL,
     protocolVersion: BRIDGE_VERSION,
     clientName: 'easyeda-mcp-pro',
-    extensionVersion: '0.4.0',
+    extensionVersion: '0.5.3',
     easyedaVersion: getEasyedaVersion(),
     devMode: false,
   };
