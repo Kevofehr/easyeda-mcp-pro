@@ -13,6 +13,7 @@ import { Storage } from '../storage/index.js';
 import { type HttpTransportInstance } from './transports/http.js';
 import { BridgeManager } from '../bridge/manager.js';
 import { registerBuiltinTools } from '../tools/register.js';
+import { registerProjectResourcesAndPrompts } from './resources-prompts.js';
 
 import { LcscClient } from '../vendors/lcsc/client.js';
 import { JlcpcbClient } from '../vendors/jlcpcb/client.js';
@@ -97,6 +98,7 @@ export async function createServer(config: EnvConfig): Promise<McpServerInstance
   };
 
   registry.registerAllOnServer(server, context);
+  registerProjectResourcesAndPrompts(server, context);
 
   server.server.onerror = (error) => {
     logger.error({ err: error }, 'server error');
