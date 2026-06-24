@@ -109,6 +109,7 @@ interface SocketHandle {
 
 const BRIDGE_PROTOCOL = 'easyeda-mcp-pro.bridge';
 const BRIDGE_VERSION = '1.0.0';
+const BRIDGE_CONTRACT_VERSION = 1;
 const BRIDGE_PORT = 49620;
 const PORT_SCAN_COUNT = 10;
 const CONNECT_TIMEOUT_MS = 8000;
@@ -1685,6 +1686,7 @@ function sendHandshake(): void {
     type: 'handshake',
     protocol: BRIDGE_PROTOCOL,
     protocolVersion: BRIDGE_VERSION,
+    contractVersion: BRIDGE_CONTRACT_VERSION,
     clientName: 'easyeda-mcp-pro',
     extensionVersion: '0.5.3',
     easyedaVersion: getEasyedaVersion(),
@@ -1763,6 +1765,22 @@ function handleMessage(raw: string): InboundMessageType {
   const message = JSON.parse(raw) as { type?: string };
 
   if (message.type === 'hello') {
+    const record = message as Record<string, unknown>;
+    if (record.contractVersion !== BRIDGE_CONTRACT_VERSION) {
+      log('Bridge hello contract version mismatch', {
+        expected: BRIDGE_CONTRACT_VERSION,
+        actual: record.contractVersion,
+      });
+    }
+    const supportedVersions = Array.isArray(record.supportedProtocolVersions)
+      ? record.supportedProtocolVersions
+      : [];
+    if (!supportedVersions.includes(BRIDGE_VERSION)) {
+      log('Bridge hello does not include this extension protocol version', {
+        protocolVersion: BRIDGE_VERSION,
+        supportedProtocolVersions: supportedVersions,
+      });
+    }
     log('Bridge handshake accepted');
     return 'hello';
   }

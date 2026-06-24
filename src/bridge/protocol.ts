@@ -1,7 +1,12 @@
 import { z } from 'zod';
 
+export const BRIDGE_PROTOCOL = 'easyeda-mcp-pro.bridge';
+export const BRIDGE_CLIENT_NAME = 'easyeda-mcp-pro';
+export const BRIDGE_CONTRACT_VERSION = 1;
+
 /** Supported protocol versions for the bridge pairing/handshake. */
 export const SUPPORTED_PROTOCOL_VERSIONS = ['1.0.0'] as const;
+export const CURRENT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
 
 /**
  * Zod schema for the initial handshake message.
@@ -9,9 +14,10 @@ export const SUPPORTED_PROTOCOL_VERSIONS = ['1.0.0'] as const;
  */
 export const BridgeHandshakeSchema = z.object({
   type: z.literal('handshake'),
-  protocol: z.literal('easyeda-mcp-pro.bridge'),
-  protocolVersion: z.string(),
-  clientName: z.literal('easyeda-mcp-pro'),
+  protocol: z.literal(BRIDGE_PROTOCOL),
+  protocolVersion: z.enum(SUPPORTED_PROTOCOL_VERSIONS),
+  clientName: z.literal(BRIDGE_CLIENT_NAME),
+  contractVersion: z.literal(BRIDGE_CONTRACT_VERSION).default(BRIDGE_CONTRACT_VERSION),
   extensionVersion: z.string().optional(),
   easyedaVersion: z.string().optional(),
   devMode: z.boolean().optional(),
@@ -45,6 +51,8 @@ export const BridgePairingResponseSchema = z.object({
 export const BridgeHelloSchema = z.object({
   type: z.literal('hello'),
   bridgeVersion: z.string(),
+  contractVersion: z.literal(BRIDGE_CONTRACT_VERSION),
+  supportedProtocolVersions: z.array(z.enum(SUPPORTED_PROTOCOL_VERSIONS)).min(1),
   easyedaVersion: z.string().optional(),
   apiVersion: z.string().optional(),
   capabilities: z.array(z.string()),

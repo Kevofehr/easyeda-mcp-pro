@@ -5,6 +5,8 @@ import {
   BridgeRequestSchema,
   BridgeResponseSchema,
   BridgeHeartbeatSchema,
+  BRIDGE_CONTRACT_VERSION,
+  SUPPORTED_PROTOCOL_VERSIONS,
 } from '../../../src/bridge/protocol.js';
 
 describe('BridgeProtocol schemas', () => {
@@ -18,6 +20,7 @@ describe('BridgeProtocol schemas', () => {
         sessionToken: 'abc123',
       });
       expect(result.type).toBe('handshake');
+      expect(result.contractVersion).toBe(BRIDGE_CONTRACT_VERSION);
     });
 
     it('should reject wrong protocol', () => {
@@ -26,6 +29,17 @@ describe('BridgeProtocol schemas', () => {
           type: 'handshake',
           protocol: 'wrong-protocol',
           protocolVersion: '1.0.0',
+          clientName: 'easyeda-mcp-pro',
+        }),
+      ).toThrow();
+    });
+
+    it('should reject unsupported protocol versions at schema boundary', () => {
+      expect(() =>
+        BridgeHandshakeSchema.parse({
+          type: 'handshake',
+          protocol: 'easyeda-mcp-pro.bridge',
+          protocolVersion: '2.0.0',
           clientName: 'easyeda-mcp-pro',
         }),
       ).toThrow();
@@ -47,6 +61,8 @@ describe('BridgeProtocol schemas', () => {
       const result = BridgeHelloSchema.parse({
         type: 'hello',
         bridgeVersion: '1.0.0',
+        contractVersion: BRIDGE_CONTRACT_VERSION,
+        supportedProtocolVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
         capabilities: ['schematic.read', 'pcb.read'],
         methodRegistryHash: 'abc123',
         devMode: false,
@@ -59,6 +75,8 @@ describe('BridgeProtocol schemas', () => {
       const result = BridgeHelloSchema.parse({
         type: 'hello',
         bridgeVersion: '1.0.0',
+        contractVersion: BRIDGE_CONTRACT_VERSION,
+        supportedProtocolVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
         capabilities: [],
         methodRegistryHash: 'abc',
         devMode: false,

@@ -12,6 +12,7 @@ export default defineConfig({
       { text: 'Tools Reference', link: '/reference/tools' },
       { text: 'Resources & Prompts', link: '/reference/resources-prompts' },
       { text: 'EasyEDA Compatibility', link: '/reference/easyeda-compatibility' },
+      { text: 'Bridge Contract', link: '/reference/bridge-contract' },
     ],
     sidebar: [
       {
@@ -28,6 +29,7 @@ export default defineConfig({
           { text: 'MCP Tools', link: '/reference/tools' },
           { text: 'Resources & Prompts', link: '/reference/resources-prompts' },
           { text: 'EasyEDA Compatibility', link: '/reference/easyeda-compatibility' },
+          { text: 'Bridge Contract', link: '/reference/bridge-contract' },
         ],
       },
     ],

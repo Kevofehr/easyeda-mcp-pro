@@ -6,6 +6,7 @@ import { getLogger } from '../utils/logger.js';
 import {
   type BridgeHello,
   type BridgeResponse,
+  BRIDGE_CONTRACT_VERSION,
   BridgeHandshakeSchema,
   BridgePairingResponseSchema,
   BridgeRequestSchema,
@@ -300,13 +301,6 @@ export class BridgeManager extends EventEmitter {
       return;
     }
 
-    // Protocol version validation
-    if (!(SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(parsed.data.protocolVersion)) {
-      logger.warn({ version: parsed.data.protocolVersion }, 'unsupported protocol version');
-      ws.close(4001, 'unsupported_protocol_version');
-      return;
-    }
-
     // Session token enforcement
     if (this.config.BRIDGE_TOKEN) {
       if (!parsed.data.sessionToken) {
@@ -351,6 +345,8 @@ export class BridgeManager extends EventEmitter {
     this.hello = {
       type: 'hello',
       bridgeVersion: SERVER_VERSION,
+      contractVersion: BRIDGE_CONTRACT_VERSION,
+      supportedProtocolVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
       easyedaVersion: parsed.data.easyedaVersion,
       capabilities: EasyedaApiMethodSchema.options,
       methodRegistryHash: this._methodRegistryHash,
