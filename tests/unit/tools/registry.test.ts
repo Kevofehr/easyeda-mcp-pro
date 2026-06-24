@@ -196,6 +196,7 @@ describe('ToolRegistry', () => {
       const mutableTool = createMockTool('mutable_tool', 'core', {
         confirmWrite: true,
         risk: 'high',
+        outputSchema: z.object({ ok: z.boolean(), written: z.boolean() }),
         handler: async () => ({ ok: true, written: true }),
       });
       registry.register(mutableTool);
@@ -248,6 +249,28 @@ describe('ToolRegistry', () => {
       const response = await handler!({});
       expect(response.isError).toBe(true);
       expect(response.content[0].text).toContain(ErrorCodes.INVALID_INPUT);
+    });
+
+    it('should return ERR_TOOL_OUTPUT_INVALID when handler result violates outputSchema', async () => {
+      const tool = createMockTool('bad_output', 'core', {
+        outputSchema: z.object({ ok: z.boolean() }),
+        handler: async () => ({ ok: 'not-a-boolean' }) as never,
+      });
+      registry.register(tool);
+
+      const { server, handlers } = mockMcpServer();
+      registry.registerAllOnServer(server as any, mockContext());
+
+      const handler = handlers.get('bad_output');
+      expect(handler).toBeDefined();
+
+      const response = await handler!({});
+      expect(response.isError).toBe(true);
+      expect(response.content[0].text).toContain(ErrorCodes.TOOL_OUTPUT_INVALID);
+      expect(response.structuredContent).toMatchObject({
+        errorCode: ErrorCodes.TOOL_OUTPUT_INVALID,
+        details: { toolName: 'bad_output' },
+      });
     });
 
     it('should return ERR_TOOL_EXECUTION on generic handler failure', async () => {

@@ -12,6 +12,7 @@ export const ErrorCodes = {
   TOOL_EXECUTION: 'ERR_TOOL_EXECUTION',
   TOOL_NOT_FOUND: 'ERR_TOOL_NOT_FOUND',
   INVALID_INPUT: 'ERR_INVALID_INPUT',
+  TOOL_OUTPUT_INVALID: 'ERR_TOOL_OUTPUT_INVALID',
 } as const;
 
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];
@@ -142,13 +143,23 @@ export class ToolRegistry {
             // ── Parse & execute ───────────────────────────────────────
             const parsed = tool.inputSchema.parse(input ?? {});
             const result = await tool.handler(context, parsed);
+            const output = tool.outputSchema.safeParse(result);
+
+            if (!output.success) {
+              return structuredErrorResponse({
+                errorCode: ErrorCodes.TOOL_OUTPUT_INVALID,
+                message: `Tool "${tool.name}" returned output that does not match its declared outputSchema.`,
+                details: { toolName: tool.name, issues: output.error.issues },
+              });
+            }
+
             const structuredContent =
-              typeof result === 'object' && result !== null
-                ? (result as Record<string, unknown>)
-                : { value: result };
+              typeof output.data === 'object' && output.data !== null
+                ? (output.data as Record<string, unknown>)
+                : { value: output.data };
             return {
               structuredContent,
-              content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+              content: [{ type: 'text' as const, text: JSON.stringify(output.data, null, 2) }],
             };
           } catch (err) {
             // ── Zod validation errors ─────────────────────────────────
