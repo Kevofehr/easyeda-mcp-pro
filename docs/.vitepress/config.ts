@@ -10,6 +10,7 @@ export default defineConfig({
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
       { text: 'Tools Reference', link: '/reference/tools' },
+      { text: 'Resources & Prompts', link: '/reference/resources-prompts' },
     ],
     sidebar: [
       {
@@ -22,7 +23,10 @@ export default defineConfig({
       },
       {
         text: 'Reference',
-        items: [{ text: 'MCP Tools', link: '/reference/tools' }],
+        items: [
+          { text: 'MCP Tools', link: '/reference/tools' },
+          { text: 'Resources & Prompts', link: '/reference/resources-prompts' },
+        ],
       },
     ],
     socialLinks: [{ icon: 'github', link: 'https://github.com/oaslananka/easyeda-mcp-pro' }],
