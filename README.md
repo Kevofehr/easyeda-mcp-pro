@@ -45,7 +45,7 @@ For advanced configurations, manual instructions, and specific clients, see [Ins
 
 ## Overview
 
-easyeda-mcp-pro is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that bridges AI assistants with hardware design workflows in EasyEDA Pro. It exposes up to 51 profile-gated MCP tools for schematic inspection and editing, controlled EasyEDA Pro API calls, BOM management, design rule checks, PCB board analysis, fabrication exports, and supplier integration.
+easyeda-mcp-pro is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that bridges AI assistants with hardware design workflows in EasyEDA Pro. It exposes 50 default profile-gated MCP tools for schematic inspection and editing, controlled EasyEDA Pro API calls, BOM management, design rule checks, PCB board analysis, fabrication exports, and supplier integration.
 
 The server connects to EasyEDA Pro via a WebSocket bridge extension, enabling real-time access to open project data. It integrates with JLCPCB, LCSC, Mouser, and DigiKey for BOM sourcing and pricing.
 
@@ -382,17 +382,19 @@ Copy `.env.example` to `.env` and edit. All variables have safe defaults — onl
 
 ### Bridge (EasyEDA Pro connection)
 
-| Variable                        | Default       | Description                               |
-| ------------------------------- | ------------- | ----------------------------------------- |
-| `BRIDGE_HOST`                   | `127.0.0.1`   | Bridge WebSocket host                     |
-| `BRIDGE_PORT`                   | `49620`       | Primary bridge port                       |
-| `BRIDGE_PORT_SCAN`              | `49620-49629` | Port scan spec (comma/range)              |
-| `BRIDGE_TIMEOUT_MS`             | `15000`       | Bridge call timeout (ms)                  |
-| `BRIDGE_HEARTBEAT_MS`           | `10000`       | Heartbeat interval (ms)                   |
-| `BRIDGE_RECONNECT_MAX_ATTEMPTS` | `0`           | Max reconnect attempts (`0` = infinite)   |
-| `BRIDGE_WAIT_FOR_EDA_MS`        | `30000`       | Wait for EasyEDA Pro on startup (ms)      |
-| `BRIDGE_MAX_PAYLOAD_SIZE`       | `1048576`     | Max bridge payload (bytes, default 1 MiB) |
-| `BRIDGE_TOKEN`                  | `''`          | Session token for extension auth          |
+| Variable                        | Default       | Description                                                              |
+| ------------------------------- | ------------- | ------------------------------------------------------------------------ |
+| `BRIDGE_HOST`                   | `127.0.0.1`   | Bridge WebSocket host                                                    |
+| `BRIDGE_PORT`                   | `49620`       | Primary bridge port                                                      |
+| `BRIDGE_PORT_SCAN`              | `49620-49629` | Port scan spec (comma/range)                                             |
+| `BRIDGE_TIMEOUT_MS`             | `15000`       | Bridge call timeout (ms)                                                 |
+| `BRIDGE_HEARTBEAT_MS`           | `10000`       | Heartbeat interval (ms)                                                  |
+| `BRIDGE_RECONNECT_MAX_ATTEMPTS` | `0`           | Max reconnect attempts (`0` = infinite)                                  |
+| `BRIDGE_WAIT_FOR_EDA_MS`        | `30000`       | Wait for EasyEDA Pro on startup (ms)                                     |
+| `BRIDGE_MAX_PAYLOAD_SIZE`       | `1048576`     | Max bridge payload (bytes, default 1 MiB)                                |
+| `BRIDGE_TOKEN`                  | `''`          | Session token for extension auth                                         |
+| `BRIDGE_RAW_EXEC_ENABLED`       | `false`       | First explicit gate for raw EasyEDA runtime JavaScript execution         |
+| `MCP_RAW_EXEC_EXPERIMENTAL`     | `false`       | Second experimental gate required before `easyeda_execute` is registered |
 
 ### Storage
 
@@ -465,9 +467,11 @@ See `.env.example` for the complete list of configuration variables.
 
 ## MCP Tools
 
-The server currently registers up to 51 profile-gated tools. Tools are filtered by the active `TOOL_PROFILE`: `core` exposes the normal workflow tools, `pro` adds manufacturing exports, `full` adds controlled documented EasyEDA API calls, and `dev` adds runtime probes for debugging.
+The server currently registers 50 default profile-gated tools. Tools are filtered by the active `TOOL_PROFILE`: `core` exposes the normal workflow tools, `pro` adds manufacturing exports, `full` adds controlled documented EasyEDA API calls, and `dev` adds runtime probes for debugging.
 
 Capability scopes add a second authorization layer when `TOOL_SCOPES` is set. Leave it empty for the default local all-capabilities mode, or restrict it with comma/space separated scopes such as `diagnostics:read`, `schematic:read`, `schematic:write`, `bom:read`, `bom:source`, `checks:read`, `pcb:read`, `pcb:write`, `export:write`, `api:read`, `api:write`, and `bridge:execute`.
+
+Raw JavaScript execution is intentionally not part of the default dev tool set. `easyeda_execute` is registered only when both `BRIDGE_RAW_EXEC_ENABLED=true` and `MCP_RAW_EXEC_EXPERIMENTAL=true` are set; when `TOOL_SCOPES` is set it also requires `bridge:execute`.
 
 ### L0 — Diagnostics (core)
 
@@ -668,7 +672,7 @@ src/
 │   └── transports/
 │       └── http.ts          # HTTP/Streamable HTTP transport
 ├── storage/                 # Node.js sqlite storage (cache, artifacts)
-├── tools/                   # 51 MCP tool definitions (6 groups)
+├── tools/                   # 50 default MCP tool definitions (6 groups)
 │   ├── register.ts, registry.ts, types.ts
 │   ├── L0_diagnostics.ts, L1_schematic.ts, L1_bom.ts
 │   ├── L1_drc_erc.ts, L1_board.ts, L1_export.ts

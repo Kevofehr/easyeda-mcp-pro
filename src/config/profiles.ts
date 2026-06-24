@@ -37,14 +37,14 @@ export const PROFILE_DEFINITIONS: Record<ToolProfile, ProfileDefinition> = {
     label: 'Dev',
     description:
       'Adds diagnostics probes for bridge methods and live component runtime shape inspection',
-    approxToolCount: '51',
+    approxToolCount: '50',
     isDefault: false,
   },
   experimental: {
     name: 'experimental',
     label: 'Experimental',
     description: 'MCP Apps, Tasks, simulation, autorouter, AI action plans',
-    approxToolCount: '51',
+    approxToolCount: '50',
     isDefault: false,
   },
 };

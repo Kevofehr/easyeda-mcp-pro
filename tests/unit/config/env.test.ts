@@ -34,6 +34,7 @@ describe('EnvSchema', () => {
     });
     expect(result.MCP_TASKS_ENABLED).toBe(true);
     expect(result.MCP_APPS_ENABLED).toBe(true);
+    expect(EnvSchema.parse({}).MCP_RAW_EXEC_EXPERIMENTAL).toBe(false);
     expect(result.JLCSEARCH_ENABLED).toBe(false);
   });
 

@@ -29,6 +29,7 @@ export const EnvSchema = z.object({
   MCP_TASKS_ENABLED: envBoolean().default(false),
   MCP_APPS_ENABLED: envBoolean().default(false),
   MCP_V2_EXPERIMENTAL: envBoolean().default(false),
+  MCP_RAW_EXEC_EXPERIMENTAL: envBoolean().default(false),
 
   BRIDGE_HOST: z.string().default('127.0.0.1'),
   BRIDGE_PORT: z.coerce.number().int().min(1).max(65535).default(49620),

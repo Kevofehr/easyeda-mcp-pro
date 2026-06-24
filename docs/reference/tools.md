@@ -23,7 +23,6 @@ These tools are profile-gated. Set the `TOOL_PROFILE` environment variable to en
 | `easyeda_component_probe`               | `dev`   | `low`    | Inspect live schematic component objects, including available methods and state getter values, to validate EasyEDA runtime mappings.                                                                                                                                                                                                                     |
 | `easyeda_drc_run`                       | `core`  | `medium` | Run design rule check (DRC) on the project to identify rule violations, clearance issues, and manufacturing constraints.                                                                                                                                                                                                                                 |
 | `easyeda_erc_run`                       | `core`  | `medium` | Run electrical rule check (ERC) on the schematic to detect unconnected nets, short circuits, and electrical conflicts.                                                                                                                                                                                                                                   |
-| `easyeda_execute`                       | `dev`   | `high`   | Execute arbitrary JavaScript in the EasyEDA Pro extension runtime via the Run API Gateway. The code receives `eda` as the EDA API root object. Requires BRIDGE_RAW_EXEC_ENABLED=true and confirmWrite=true. Use this when typed API methods are unavailable or to run multi-step sequences atomically.                                                   |
 | `easyeda_export_gerbers`                | `core`  | `medium` | Export PCB design to Gerber files for PCB fabrication.                                                                                                                                                                                                                                                                                                   |
 | `easyeda_export_netlist`                | `pro`   | `low`    | Export the schematic netlist in a specified EDA tool format (PADS, Allegro, or Altium).                                                                                                                                                                                                                                                                  |
 | `easyeda_export_pdf`                    | `pro`   | `low`    | Export the schematic and/or board layout to PDF.                                                                                                                                                                                                                                                                                                         |
@@ -526,35 +525,6 @@ Returns a JSON object matching the schema:
   warning_count: any;
   passed: any;
   not_available: any;
-}
-```
-
----
-
-## `easyeda_execute`
-
-**Profile:** `dev` | **Risk Level:** `high`
-
-> Execute arbitrary JavaScript in the EasyEDA Pro extension runtime via the Run API Gateway. The code receives `eda` as the EDA API root object. Requires BRIDGE_RAW_EXEC_ENABLED=true and confirmWrite=true. Use this when typed API methods are unavailable or to run multi-step sequences atomically.
-
-### Input Parameters
-
-| Parameter      | Type  | Required | Description |
-| -------------- | ----- | -------- | ----------- |
-| `code`         | `any` | Yes      |             |
-| `confirmWrite` | `any` | Yes      |             |
-| `timeoutMs`    | `any` | Yes      |             |
-
-### Output Format
-
-Returns a JSON object matching the schema:
-
-```ts
-{
-  ok: any;
-  result: any;
-  error: any;
-  disabled: any;
 }
 ```
 

@@ -448,6 +448,28 @@ describe('ToolRegistry', () => {
     expect(registry.getEnabledTools().some((tool) => tool.name === 'easyeda_api_call')).toBe(true);
   });
 
+  it('should not register easyeda_execute by default even for dev profile', () => {
+    registry.setProfile('dev');
+    registerBuiltinTools(registry, TEST_CONFIG);
+
+    expect(registry.get('easyeda_execute')).toBeUndefined();
+    expect(registry.getEnabledTools().some((tool) => tool.name === 'easyeda_execute')).toBe(false);
+  });
+
+  it('should register easyeda_execute only when both raw execution gates are enabled', () => {
+    const config = EnvSchema.parse({
+      NODE_ENV: 'test',
+      BRIDGE_RAW_EXEC_ENABLED: 'true',
+      MCP_RAW_EXEC_EXPERIMENTAL: 'true',
+    });
+
+    registry.setProfile('dev');
+    registerBuiltinTools(registry, config);
+
+    expect(registry.get('easyeda_execute')).toBeDefined();
+    expect(registry.getEnabledTools().some((tool) => tool.name === 'easyeda_execute')).toBe(true);
+  });
+
   it('should require confirmation before generic API write calls reach the bridge', async () => {
     registerBuiltinTools(registry, TEST_CONFIG);
     const tool = registry.get('easyeda_api_call');

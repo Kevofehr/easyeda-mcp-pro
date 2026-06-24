@@ -285,6 +285,7 @@ function registerDiagnosticsCore(
           ai_enabled: config.AI_PROVIDER !== 'none',
           dev_bridge: config.EASYEDA_DEV_BRIDGE,
           bridge_raw_exec_enabled: config.BRIDGE_RAW_EXEC_ENABLED,
+          raw_exec_experimental: config.MCP_RAW_EXEC_EXPERIMENTAL,
         },
       };
     },

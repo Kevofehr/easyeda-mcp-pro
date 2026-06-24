@@ -77,3 +77,7 @@ OAUTH_JWKS_URI=https://your-identity-provider.com/.well-known/jwks.json
 ```
 
 _Note: Non-loopback `HTTP_HOST` (e.g., `0.0.0.0`) without OAuth enabled is rejected at startup for security._
+
+### Raw execution quarantine
+
+`easyeda_execute` is not registered by default. To expose it for local debugging you must set both `BRIDGE_RAW_EXEC_ENABLED=true` and `MCP_RAW_EXEC_EXPERIMENTAL=true`. When `TOOL_SCOPES` is set, include `bridge:execute` as well. Do not enable these settings in production.

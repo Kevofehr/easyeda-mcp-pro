@@ -80,47 +80,49 @@ function registerDiagnosticsApi(
     },
   });
 
-  registry.register({
-    name: 'easyeda_execute',
-    title: 'Execute EasyEDA API code',
-    description:
-      'Execute arbitrary JavaScript in the EasyEDA Pro extension runtime via the Run API Gateway. The code receives `eda` as the EDA API root object. Requires BRIDGE_RAW_EXEC_ENABLED=true and confirmWrite=true. Use this when typed API methods are unavailable or to run multi-step sequences atomically.',
-    profile: 'dev',
-    evidence: ['official-docs', 'runtime-probe'],
-    risk: 'high',
-    confirmWrite: true,
-    group: 'diagnostics',
-    version: '1.0.0',
-    annotations: {
-      readOnlyHint: false,
-      destructiveHint: true,
-      idempotentHint: false,
-    },
-    inputSchema: executeInputSchema,
-    outputSchema: z.object({
-      ok: z.boolean(),
-      result: z.unknown().optional(),
-      error: z.string().optional(),
-      disabled: z.boolean().optional(),
-    }),
-    handler: async (ctx: ToolContext, params: unknown) => {
-      const { code, timeoutMs } = executeInputSchema.parse(params);
-      if (!config.BRIDGE_RAW_EXEC_ENABLED) {
-        return {
-          ok: false,
-          disabled: true,
-          error:
-            'Raw execution is disabled. Set BRIDGE_RAW_EXEC_ENABLED=true to enable easyeda_execute.',
-        };
-      }
-      try {
-        const result = await ctx.bridge.call('api.execute', { code }, { timeoutMs });
-        return { ok: true, result: (result as Record<string, unknown>).result };
-      } catch (err) {
-        return { ok: false, error: err instanceof Error ? err.message : String(err) };
-      }
-    },
-  });
+  if (config.BRIDGE_RAW_EXEC_ENABLED && config.MCP_RAW_EXEC_EXPERIMENTAL) {
+    registry.register({
+      name: 'easyeda_execute',
+      title: 'Execute EasyEDA API code',
+      description:
+        'Execute arbitrary JavaScript in the EasyEDA Pro extension runtime via the Run API Gateway. The code receives `eda` as the EDA API root object. Requires BRIDGE_RAW_EXEC_ENABLED=true, MCP_RAW_EXEC_EXPERIMENTAL=true, bridge:execute scope when TOOL_SCOPES is set, and confirmWrite=true. Use this when typed API methods are unavailable or to run multi-step sequences atomically.',
+      profile: 'dev',
+      evidence: ['official-docs', 'runtime-probe'],
+      risk: 'high',
+      confirmWrite: true,
+      group: 'diagnostics',
+      version: '1.0.0',
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+      },
+      inputSchema: executeInputSchema,
+      outputSchema: z.object({
+        ok: z.boolean(),
+        result: z.unknown().optional(),
+        error: z.string().optional(),
+        disabled: z.boolean().optional(),
+      }),
+      handler: async (ctx: ToolContext, params: unknown) => {
+        const { code, timeoutMs } = executeInputSchema.parse(params);
+        if (!config.BRIDGE_RAW_EXEC_ENABLED) {
+          return {
+            ok: false,
+            disabled: true,
+            error:
+              'Raw execution is disabled. Set BRIDGE_RAW_EXEC_ENABLED=true to enable easyeda_execute.',
+          };
+        }
+        try {
+          const result = await ctx.bridge.call('api.execute', { code }, { timeoutMs });
+          return { ok: true, result: (result as Record<string, unknown>).result };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      },
+    });
+  }
 
   registry.register({
     name: 'easyeda_component_probe',

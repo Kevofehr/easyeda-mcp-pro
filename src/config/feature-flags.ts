@@ -13,6 +13,7 @@ export interface FeatureFlags {
   aiEnabled: boolean;
   devBridge: boolean;
   bridgeRawExecEnabled: boolean;
+  rawExecExperimental: boolean;
 }
 
 export function loadFeatureFlags(config: EnvConfig): FeatureFlags {
@@ -29,5 +30,6 @@ export function loadFeatureFlags(config: EnvConfig): FeatureFlags {
     aiEnabled: config.AI_PROVIDER !== 'none',
     devBridge: config.EASYEDA_DEV_BRIDGE,
     bridgeRawExecEnabled: config.BRIDGE_RAW_EXEC_ENABLED,
+    rawExecExperimental: config.MCP_RAW_EXEC_EXPERIMENTAL,
   };
 }
