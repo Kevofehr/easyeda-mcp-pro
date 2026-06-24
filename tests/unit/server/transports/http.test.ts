@@ -381,6 +381,43 @@ describe('createOriginValidator', () => {
     expect(next).toHaveBeenCalled();
   });
 
+  it('should allow loopback origin with an explicit development port', () => {
+    const config = EnvSchema.parse({
+      HTTP_HOST: '127.0.0.1',
+      HTTP_PORT: 3000,
+      ALLOWED_ORIGINS: '',
+    });
+    const middleware = createOriginValidator(config);
+    const { req, res, next } = mockReqRes({
+      headers: { origin: 'http://localhost:5173' },
+    });
+    middleware(req, res, next);
+    expect(res.setHeader).toHaveBeenCalledWith(
+      'Access-Control-Allow-Origin',
+      'http://localhost:5173',
+    );
+    expect(next).toHaveBeenCalled();
+  });
+
+  it('should reject non-loopback Host header while bound to loopback', () => {
+    const config = EnvSchema.parse({
+      HTTP_HOST: '127.0.0.1',
+      HTTP_PORT: 3000,
+      ALLOWED_ORIGINS: '',
+    });
+    const middleware = createOriginValidator(config);
+    const { req, res, next } = mockReqRes({
+      headers: { host: 'evil.example.com:3000' },
+    });
+    middleware(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      error: 'Invalid Host header',
+      code: 'host_mismatch',
+    });
+    expect(next).not.toHaveBeenCalled();
+  });
+
   it('should allow localhost origin on loopback', () => {
     const config = EnvSchema.parse({
       HTTP_HOST: '127.0.0.1',
@@ -531,6 +568,21 @@ describe('createHttpTransport — OAuth/JWKS validation', () => {
   function fetchWithPort(port: number, init?: RequestInit) {
     return fetch(`http://127.0.0.1:${port}/healthz`, init);
   }
+
+  it('should allow CORS preflight before OAuth token validation', async () => {
+    const { server, port } = await createOAuthApp();
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/healthz`, {
+        method: 'OPTIONS',
+        headers: { Origin: 'http://localhost:5173' },
+      });
+      expect(res.status).toBe(204);
+      expect(res.headers.get('access-control-allow-origin')).toBe('http://localhost:5173');
+      expect(res.headers.get('access-control-allow-methods')).toBe('GET, POST, OPTIONS');
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
 
   it('should reject requests without Authorization header', async () => {
     const { server, port } = await createOAuthApp();

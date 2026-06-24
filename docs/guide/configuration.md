@@ -68,6 +68,8 @@ HTTP_PORT=3000
 HTTP_RATE_LIMIT_MAX=100
 ```
 
+Loopback HTTP deployments validate browser `Origin` headers and only accept loopback `Host` headers. For browser tooling running on a local development port, use the default loopback host or set `CORS_ORIGIN` / `ALLOWED_ORIGINS` explicitly.
+
 ### Production Security for HTTP
 
 For remote HTTP deployments, OAuth 2.0 validation can be enforced:

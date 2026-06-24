@@ -185,11 +185,12 @@ The `ToolRegistry` enforces unique tool names at registration time — duplicate
 
 **Origin validation (CORS):**
 
-- Loopback mode: accepts `http://127.0.0.1`, `http://localhost`, `http://::1`, `null`, and the legacy `CORS_ORIGIN` value.
-- Non-loopback mode: requires an explicit `ALLOWED_ORIGINS` allowlist (comma-separated). Wildcard (`*`) disables origin checking.
-- Requests without an `Origin` header (non-browser clients) are always allowed.
+- Loopback mode: accepts loopback `http://` / `https://` origins with or without explicit ports, `null`, and the legacy `CORS_ORIGIN` value.
+- Non-loopback mode: requires an explicit `ALLOWED_ORIGINS` allowlist (comma-separated). Wildcard (`*`) disables origin checking and should only be used behind a trusted gateway.
+- Requests without an `Origin` header (non-browser clients) are allowed, but the `Host` header is still validated.
 - Unknown origins receive `403 Origin not allowed`.
-- DNS rebinding protection validates the `Host` header against the configured `HTTP_HOST` on non-loopback deployments.
+- DNS rebinding protection validates the `Host` header in both loopback and non-loopback modes. Loopback binds only accept loopback hostnames/IPs.
+- CORS preflight is handled after origin validation but before OAuth token validation, so browser preflight can succeed without weakening authenticated routes.
 
 **Health endpoints:**
 
