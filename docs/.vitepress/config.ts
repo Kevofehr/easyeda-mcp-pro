@@ -11,6 +11,7 @@ export default defineConfig({
       { text: 'Guide', link: '/guide/getting-started' },
       { text: 'Tools Reference', link: '/reference/tools' },
       { text: 'Resources & Prompts', link: '/reference/resources-prompts' },
+      { text: 'EasyEDA Compatibility', link: '/reference/easyeda-compatibility' },
     ],
     sidebar: [
       {
@@ -26,6 +27,7 @@ export default defineConfig({
         items: [
           { text: 'MCP Tools', link: '/reference/tools' },
           { text: 'Resources & Prompts', link: '/reference/resources-prompts' },
+          { text: 'EasyEDA Compatibility', link: '/reference/easyeda-compatibility' },
         ],
       },
     ],
