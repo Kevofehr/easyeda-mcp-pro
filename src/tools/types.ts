@@ -49,6 +49,15 @@ export interface ToolDefinition<
   handler: (context: ToolContext, input: z.infer<TInput>) => Promise<z.infer<TOutput>>;
 }
 
+export interface BridgeDiagnosticsSnapshot {
+  manager_uptime_ms?: number;
+  active_port?: number;
+  last_heartbeat_ms?: number;
+  heartbeat_silence_ms?: number;
+  method_registry_hash?: string;
+  reconnect?: unknown;
+}
+
 export interface ToolContext {
   profile: ToolProfile;
   bridge: {
@@ -58,6 +67,11 @@ export interface ToolContext {
       params?: TParams,
       opts?: { timeoutMs?: number; traceparent?: string },
     ) => Promise<TResult>;
+    uptimeMs?: number;
+    activePort?: number;
+    lastHeartbeatMs?: number;
+    methodRegistryHash?: string;
+    telemetry?: unknown;
   };
   config: {
     bridgeTimeoutMs: number;

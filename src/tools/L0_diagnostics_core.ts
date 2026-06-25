@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { type ToolDefinition, type ToolContext } from './types.js';
+import { type BridgeDiagnosticsSnapshot, type ToolDefinition, type ToolContext } from './types.js';
 import { type EnvConfig } from '../config/env.js';
 import { PROFILE_DEFINITIONS } from '../config/profiles.js';
 import { SERVER_VERSION } from '../config/version.js';
@@ -7,6 +7,28 @@ import { SERVER_VERSION } from '../config/version.js';
 const apiInventoryInputSchema = z.object({
   filter: z.string().optional(),
 });
+
+const bridgeDiagnosticsSchema = z.object({
+  manager_uptime_ms: z.number().optional(),
+  active_port: z.number().optional(),
+  last_heartbeat_ms: z.number().optional(),
+  heartbeat_silence_ms: z.number().optional(),
+  method_registry_hash: z.string().optional(),
+  reconnect: z.unknown().optional(),
+});
+
+function getBridgeDiagnostics(ctx: ToolContext): BridgeDiagnosticsSnapshot {
+  const lastHeartbeat = ctx.bridge.lastHeartbeatMs;
+  return {
+    manager_uptime_ms: ctx.bridge.uptimeMs,
+    active_port: ctx.bridge.activePort,
+    last_heartbeat_ms: lastHeartbeat,
+    heartbeat_silence_ms:
+      lastHeartbeat && lastHeartbeat > 0 ? Date.now() - lastHeartbeat : undefined,
+    method_registry_hash: ctx.bridge.methodRegistryHash,
+    reconnect: ctx.bridge.telemetry,
+  };
+}
 
 function registerDiagnosticsCore(
   registry: { register: (def: ToolDefinition) => void },
@@ -74,12 +96,14 @@ function registerDiagnosticsCore(
       last_heartbeat_ms: z.number().optional(),
       uptime_ms: z.number().optional(),
       status_error: z.string().optional(),
+      diagnostics: bridgeDiagnosticsSchema.optional(),
     }),
     handler: async (ctx: ToolContext) => {
       if (!ctx.bridge.connected) {
         return {
           connected: false,
           uptime_ms: process.uptime() * 1000,
+          diagnostics: getBridgeDiagnostics(ctx),
         };
       }
       try {
@@ -99,12 +123,14 @@ function registerDiagnosticsCore(
           dev_mode: data.devMode,
           last_heartbeat_ms: data.lastHeartbeatMs,
           uptime_ms: process.uptime() * 1000,
+          diagnostics: getBridgeDiagnostics(ctx),
         };
       } catch (err) {
         return {
           connected: true,
           uptime_ms: process.uptime() * 1000,
           status_error: err instanceof Error ? err.message : String(err),
+          diagnostics: getBridgeDiagnostics(ctx),
         };
       }
     },

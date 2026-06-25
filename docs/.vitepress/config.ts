@@ -14,6 +14,7 @@ export default defineConfig({
       { text: 'EasyEDA Compatibility', link: '/reference/easyeda-compatibility' },
       { text: 'Bridge Contract', link: '/reference/bridge-contract' },
       { text: 'Runtime Inventory', link: '/reference/runtime-inventory' },
+      { text: 'Bridge Telemetry', link: '/reference/bridge-telemetry' },
     ],
     sidebar: [
       {
@@ -32,6 +33,7 @@ export default defineConfig({
           { text: 'EasyEDA Compatibility', link: '/reference/easyeda-compatibility' },
           { text: 'Bridge Contract', link: '/reference/bridge-contract' },
           { text: 'Runtime Inventory', link: '/reference/runtime-inventory' },
+          { text: 'Bridge Telemetry', link: '/reference/bridge-telemetry' },
         ],
       },
     ],
