@@ -13,6 +13,7 @@ export default defineConfig({
       { text: 'Resources & Prompts', link: '/reference/resources-prompts' },
       { text: 'EasyEDA Compatibility', link: '/reference/easyeda-compatibility' },
       { text: 'Bridge Contract', link: '/reference/bridge-contract' },
+      { text: 'Runtime Inventory', link: '/reference/runtime-inventory' },
     ],
     sidebar: [
       {
@@ -30,6 +31,7 @@ export default defineConfig({
           { text: 'Resources & Prompts', link: '/reference/resources-prompts' },
           { text: 'EasyEDA Compatibility', link: '/reference/easyeda-compatibility' },
           { text: 'Bridge Contract', link: '/reference/bridge-contract' },
+          { text: 'Runtime Inventory', link: '/reference/runtime-inventory' },
         ],
       },
     ],
