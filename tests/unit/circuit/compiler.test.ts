@@ -131,6 +131,63 @@ describe('compile', () => {
     expect(cir.nets[1].name).toBe('3V3_OUT');
   });
 
+  it('synthesizes power domains for each rail', () => {
+    const result = compile(powerSupplyIntent);
+    const cir = result.circuitIR;
+
+    expect(cir.powerDomains).toHaveLength(2);
+    expect(cir.powerDomains[0]).toMatchObject({
+      id: 'pd-rail-12V_IN',
+      nominalVoltage: 12,
+      sourceRailRef: 'rail-12V_IN',
+      railRefs: ['rail-12V_IN'],
+    });
+    expect(cir.nets[0]).toMatchObject({
+      railRef: 'rail-12V_IN',
+      powerDomainRef: 'pd-rail-12V_IN',
+      signalClassRef: 'sc-power',
+    });
+  });
+
+  it('synthesizes signal classes from electrical intent', () => {
+    const highSpeedIntent = {
+      ...powerSupplyIntent,
+      requirements: {
+        ...powerSupplyIntent.requirements,
+        electrical: { frequencyMaxHz: 48_000_000, currentMaxAmps: 1, vinMax: 12 },
+      },
+    };
+    const result = compile(highSpeedIntent);
+    const cir = result.circuitIR;
+
+    expect(cir.signalClasses.map((signalClass) => signalClass.id)).toContain('sc-power');
+    expect(cir.signalClasses.map((signalClass) => signalClass.id)).toContain('sc-high-speed');
+    expect(cir.signalClasses.find((signalClass) => signalClass.id === 'sc-power')).toMatchObject({
+      kind: 'power',
+      netNames: ['12V_IN', '3V3_OUT'],
+      routing: { traceWidthMm: 0.5, clearanceMm: 0.2 },
+    });
+  });
+
+  it('synthesizes physical constraints from mechanical and safety intent', () => {
+    const safetyIntent = {
+      ...powerSupplyIntent,
+      requirements: {
+        ...powerSupplyIntent.requirements,
+        mechanical: { ...powerSupplyIntent.requirements.mechanical, mountingHoles: true },
+        safety: { isolation: true },
+      },
+    };
+    const result = compile(safetyIntent);
+    const cir = result.circuitIR;
+
+    expect(cir.physicalConstraints.map((constraint) => constraint.id)).toEqual([
+      'pc-board-outline',
+      'pc-mounting-holes',
+      'pc-isolation-clearance',
+    ]);
+  });
+
   it('preserves traceability IDs from DesignIntent to CircuitIR', () => {
     const result = compile(powerSupplyIntent);
     const cir = result.circuitIR;

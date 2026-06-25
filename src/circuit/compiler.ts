@@ -27,8 +27,11 @@ import {
   PowerRail,
   Device,
   Net,
+  PowerDomain,
+  SignalClass,
+  PhysicalConstraint,
 } from './circuit-ir.js';
-import { ValidationStatus, NetType } from './types.js';
+import { ValidationStatus, NetType, ConstraintSeverity } from './types.js';
 import { CircuitError, CircuitErrorCode, fromZodError } from './errors.js';
 
 // ── Compile options ───────────────────────────────────────────────────────
@@ -108,6 +111,10 @@ function compileDeviceStubs(blocks: Block[]): Device[] {
   }));
 }
 
+function compilePowerDomainId(rail: PowerRail): string {
+  return `pd-${rail.id}`;
+}
+
 function compilePowerNets(rails: PowerRail[]): Net[] {
   return rails.map((rail) => ({
     id: `net-${rail.id}`,
@@ -115,9 +122,107 @@ function compilePowerNets(rails: PowerRail[]): Net[] {
     type: NetType.Power,
     nodes: [],
     blockRef: rail.sourceBlockRef,
+    railRef: rail.id,
+    powerDomainRef: compilePowerDomainId(rail),
+    signalClassRef: 'sc-power',
     designIntentRef: rail.designIntentRef,
     metadata: [],
   }));
+}
+
+function compilePowerDomains(rails: PowerRail[]): PowerDomain[] {
+  return rails.map((rail) => ({
+    id: compilePowerDomainId(rail),
+    name: `${rail.name} power domain`,
+    nominalVoltage: rail.voltage,
+    tolerancePercent: rail.tolerance,
+    railRefs: [rail.id],
+    sourceRailRef: rail.id,
+    loadDeviceRefs: [],
+    maxCurrentAmps: rail.maxCurrentAmps,
+    isolation: 'none',
+    designIntentRef: rail.designIntentRef,
+    metadata: [],
+  }));
+}
+
+function compileSignalClasses(designIntent: DesignIntent, powerNets: Net[]): SignalClass[] {
+  const classes: SignalClass[] = [
+    {
+      id: 'sc-power',
+      name: 'Power rails',
+      kind: 'power',
+      netNames: powerNets.map((net) => net.name),
+      routing: {
+        traceWidthMm: designIntent.requirements.electrical.currentMaxAmps ? 0.5 : undefined,
+        clearanceMm:
+          designIntent.requirements.electrical.vinMax &&
+          designIntent.requirements.electrical.vinMax > 30
+            ? 0.6
+            : 0.2,
+      },
+      designIntentRef: powerNets.flatMap((net) => net.designIntentRef),
+      metadata: [],
+    },
+  ];
+
+  if (designIntent.requirements.electrical.frequencyMaxHz) {
+    classes.push({
+      id: 'sc-high-speed',
+      name: 'High-speed candidate signals',
+      kind: 'high-speed',
+      netNames: [],
+      maxFrequencyHz: designIntent.requirements.electrical.frequencyMaxHz,
+      routing: { returnPathNet: 'GND' },
+      designIntentRef: [],
+      metadata: [{ key: 'source', value: 'requirements.electrical.frequencyMaxHz' }],
+    });
+  }
+
+  return classes;
+}
+
+function compilePhysicalConstraints(designIntent: DesignIntent): PhysicalConstraint[] {
+  const constraints: PhysicalConstraint[] = [];
+  const mechanical = designIntent.requirements.mechanical;
+  if (mechanical.widthMm || mechanical.heightMm) {
+    constraints.push({
+      id: 'pc-board-outline',
+      type: 'mechanical',
+      severity: ConstraintSeverity.Required,
+      targetType: 'board',
+      description: 'Board outline must satisfy requested mechanical dimensions.',
+      value: `${mechanical.widthMm ?? 'unspecified'}x${mechanical.heightMm ?? 'unspecified'}`,
+      unit: 'mm',
+      designIntentRef: [],
+      metadata: [],
+    });
+  }
+  if (mechanical.mountingHoles) {
+    constraints.push({
+      id: 'pc-mounting-holes',
+      type: 'mechanical',
+      severity: ConstraintSeverity.Required,
+      targetType: 'board',
+      description: 'Board requires mounting-hole placement planning before PCB write operations.',
+      value: true,
+      designIntentRef: [],
+      metadata: [],
+    });
+  }
+  if (designIntent.requirements.safety.isolation) {
+    constraints.push({
+      id: 'pc-isolation-clearance',
+      type: 'creepage',
+      severity: ConstraintSeverity.Required,
+      targetType: 'board',
+      description:
+        'Isolation requirement must be converted into clearance and creepage rules before layout.',
+      designIntentRef: [],
+      metadata: [{ key: 'source', value: 'requirements.safety.isolation' }],
+    });
+  }
+  return constraints;
 }
 
 function buildCircuitIR(
@@ -126,6 +231,9 @@ function buildCircuitIR(
   rails: PowerRail[],
   devices: Device[],
   nets: Net[],
+  powerDomains: PowerDomain[],
+  signalClasses: SignalClass[],
+  physicalConstraints: PhysicalConstraint[],
   opts: CompileOptions,
 ): CircuitIR {
   return {
@@ -140,9 +248,9 @@ function buildCircuitIR(
     devices,
     nets,
     rails,
-    powerDomains: [],
-    signalClasses: [],
-    physicalConstraints: [],
+    powerDomains,
+    signalClasses,
+    physicalConstraints,
     interfaces: [],
     constraints: [],
     bom: { excludeRefs: [], preferredVendors: [] },
@@ -212,10 +320,25 @@ export function compile(input: unknown, options?: CompileOptions): CompileResult
   // ── 5. Create power nets ───────────────────────────────────────────────
   const nets = compilePowerNets(rails);
 
-  // ── 6. Build CircuitIR ──────────────────────────────────────────────────
-  const circuitIR = buildCircuitIR(designIntent, blocks, rails, devices, nets, opts);
+  // ── 6. Compile professional planning context ───────────────────────────
+  const powerDomains = compilePowerDomains(rails);
+  const signalClasses = compileSignalClasses(designIntent, nets);
+  const physicalConstraints = compilePhysicalConstraints(designIntent);
 
-  // ── 7. Validate output CircuitIR ────────────────────────────────────────
+  // ── 7. Build CircuitIR ──────────────────────────────────────────────────
+  const circuitIR = buildCircuitIR(
+    designIntent,
+    blocks,
+    rails,
+    devices,
+    nets,
+    powerDomains,
+    signalClasses,
+    physicalConstraints,
+    opts,
+  );
+
+  // ── 8. Validate output CircuitIR ────────────────────────────────────────
   const parsed = CircuitIRSchema.safeParse(circuitIR);
   if (!parsed.success) {
     const errors = fromZodError(parsed.error, 'compile.output');
