@@ -15,6 +15,7 @@ export default defineConfig({
       { text: 'Bridge Contract', link: '/reference/bridge-contract' },
       { text: 'Runtime Inventory', link: '/reference/runtime-inventory' },
       { text: 'Bridge Telemetry', link: '/reference/bridge-telemetry' },
+      { text: 'Save/Export Safety', link: '/reference/save-export-rollback-safety' },
     ],
     sidebar: [
       {
@@ -34,6 +35,7 @@ export default defineConfig({
           { text: 'Bridge Contract', link: '/reference/bridge-contract' },
           { text: 'Runtime Inventory', link: '/reference/runtime-inventory' },
           { text: 'Bridge Telemetry', link: '/reference/bridge-telemetry' },
+          { text: 'Save/Export Safety', link: '/reference/save-export-rollback-safety' },
         ],
       },
     ],
