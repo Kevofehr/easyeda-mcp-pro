@@ -51,6 +51,9 @@ const designIntentRefSchema = z.object({
   note: z.string().max(MAX_NOTE_LENGTH).optional(),
 });
 
+const metadataEntrySchema = z.object({ key: z.string(), value: z.string() });
+const physicalValueSchema = z.union([z.string(), z.number(), z.boolean()]);
+
 const metadataSchema = z.object({
   version: z.literal('1.0.0').default('1.0.0'),
   createdAt: z.string().datetime().optional(),
@@ -82,8 +85,11 @@ export const DeviceSchema = z.object({
   datasheet: z.string().url().optional().or(z.literal('')),
   lcsc: z.string().max(MAX_LCSC_LENGTH).optional(),
   blockRef: z.string().max(MAX_ID_LENGTH).optional(),
+  powerDomainRef: z.string().max(MAX_ID_LENGTH).optional(),
+  placementZoneRef: z.string().max(MAX_ID_LENGTH).optional(),
+  estimatedDissipationWatts: z.number().nonnegative().optional(),
   designIntentRef: z.array(designIntentRefSchema).default([]),
-  metadata: z.array(z.object({ key: z.string(), value: z.string() })).default([]),
+  metadata: z.array(metadataEntrySchema).default([]),
 });
 
 export type Device = z.infer<typeof DeviceSchema>;
@@ -101,8 +107,11 @@ export const NetSchema = z.object({
   type: z.nativeEnum(NetType).default(NetType.Signal),
   nodes: z.array(NetNodeSchema).default([]),
   blockRef: z.string().max(MAX_ID_LENGTH).optional(),
+  powerDomainRef: z.string().max(MAX_ID_LENGTH).optional(),
+  signalClassRef: z.string().max(MAX_ID_LENGTH).optional(),
+  railRef: z.string().max(MAX_ID_LENGTH).optional(),
   designIntentRef: z.array(designIntentRefSchema).default([]),
-  metadata: z.array(z.object({ key: z.string(), value: z.string() })).default([]),
+  metadata: z.array(metadataEntrySchema).default([]),
 });
 
 export type Net = z.infer<typeof NetSchema>;
@@ -119,10 +128,109 @@ export const PowerRailSchema = z.object({
   sourceBlockRef: z.string().max(MAX_ID_LENGTH).optional(),
   sinkBlockRefs: z.array(z.string()).default([]),
   designIntentRef: z.array(designIntentRefSchema).default([]),
-  metadata: z.array(z.object({ key: z.string(), value: z.string() })).default([]),
+  metadata: z.array(metadataEntrySchema).default([]),
 });
 
 export type PowerRail = z.infer<typeof PowerRailSchema>;
+
+// ── Power Domain ──────────────────────────────────────────────────────────
+
+export const PowerDomainSchema = z.object({
+  id: z.string().min(1).max(MAX_ID_LENGTH),
+  name: z.string().min(1).max(MAX_NAME_LENGTH),
+  nominalVoltage: z.number().optional(),
+  tolerancePercent: z.number().min(0).max(100).default(5),
+  groundNet: z.string().max(MAX_NAME_LENGTH).optional(),
+  railRefs: z.array(z.string().max(MAX_ID_LENGTH)).default([]),
+  sourceRailRef: z.string().max(MAX_ID_LENGTH).optional(),
+  loadDeviceRefs: z.array(z.string().max(MAX_ID_LENGTH)).default([]),
+  maxCurrentAmps: z.number().nonnegative().optional(),
+  isolation: z.enum(['none', 'functional', 'reinforced', 'galvanic']).default('none'),
+  designIntentRef: z.array(designIntentRefSchema).default([]),
+  metadata: z.array(metadataEntrySchema).default([]),
+});
+
+export type PowerDomain = z.infer<typeof PowerDomainSchema>;
+
+// ── Signal Class ──────────────────────────────────────────────────────────
+
+export const SignalClassSchema = z.object({
+  id: z.string().min(1).max(MAX_ID_LENGTH),
+  name: z.string().min(1).max(MAX_NAME_LENGTH),
+  kind: z.enum([
+    'digital',
+    'analog',
+    'power',
+    'ground',
+    'clock',
+    'reset',
+    'i2c',
+    'spi',
+    'uart',
+    'usb',
+    'can',
+    'rf',
+    'high-speed',
+    'differential',
+    'sensitive',
+  ]),
+  netNames: z.array(z.string().min(1).max(MAX_NAME_LENGTH)).default([]),
+  differentialPair: z
+    .object({
+      positiveNet: z.string().min(1).max(MAX_NAME_LENGTH),
+      negativeNet: z.string().min(1).max(MAX_NAME_LENGTH),
+      targetImpedanceOhms: z.number().positive().optional(),
+      lengthMatchToleranceMm: z.number().nonnegative().optional(),
+    })
+    .optional(),
+  impedanceOhms: z.number().positive().optional(),
+  maxFrequencyHz: z.number().positive().optional(),
+  edgeRateNs: z.number().positive().optional(),
+  routing: z
+    .object({
+      preferredLayer: z.string().max(MAX_ID_LENGTH).optional(),
+      traceWidthMm: z.number().positive().optional(),
+      clearanceMm: z.number().nonnegative().optional(),
+      maxLengthMm: z.number().positive().optional(),
+      shieldNet: z.string().max(MAX_NAME_LENGTH).optional(),
+      returnPathNet: z.string().max(MAX_NAME_LENGTH).optional(),
+    })
+    .default({}),
+  designIntentRef: z.array(designIntentRefSchema).default([]),
+  metadata: z.array(metadataEntrySchema).default([]),
+});
+
+export type SignalClass = z.infer<typeof SignalClassSchema>;
+
+// ── Physical Constraint ───────────────────────────────────────────────────
+
+export const PhysicalConstraintSchema = z.object({
+  id: z.string().min(1).max(MAX_ID_LENGTH),
+  type: z.enum([
+    'placement',
+    'clearance',
+    'creepage',
+    'thermal',
+    'height',
+    'mechanical',
+    'keepout',
+    'accessibility',
+    'testability',
+  ]),
+  severity: z.nativeEnum(ConstraintSeverity).default(ConstraintSeverity.Required),
+  targetType: z.enum(['device', 'net', 'block', 'interface', 'zone', 'board']),
+  targetRef: z.string().max(MAX_ID_LENGTH).optional(),
+  description: z.string().min(1).max(MAX_DESCRIPTION_LENGTH),
+  value: physicalValueSchema.optional(),
+  unit: z.string().max(MAX_TYPE_LENGTH).optional(),
+  minClearanceMm: z.number().nonnegative().optional(),
+  preferredSide: z.nativeEnum(PlacementSide).optional(),
+  keepoutRef: z.string().max(MAX_ID_LENGTH).optional(),
+  designIntentRef: z.array(designIntentRefSchema).default([]),
+  metadata: z.array(metadataEntrySchema).default([]),
+});
+
+export type PhysicalConstraint = z.infer<typeof PhysicalConstraintSchema>;
 
 // ── Interface ─────────────────────────────────────────────────────────────
 
@@ -302,6 +410,9 @@ export const CircuitIRSchema = z
     devices: z.array(DeviceSchema).default([]),
     nets: z.array(NetSchema).default([]),
     rails: z.array(PowerRailSchema).default([]),
+    powerDomains: z.array(PowerDomainSchema).default([]),
+    signalClasses: z.array(SignalClassSchema).default([]),
+    physicalConstraints: z.array(PhysicalConstraintSchema).default([]),
     interfaces: z.array(InterfaceSchema).default([]),
     constraints: z.array(ConstraintSchema).default([]),
 
@@ -342,6 +453,80 @@ export const CircuitIRSchema = z
     {
       message: 'All device blockRefs must reference a valid block ID',
       path: ['devices'],
+    },
+  )
+  .refine(
+    (data) => {
+      const railIds = new Set(data.rails.map((rail) => rail.id));
+      for (const domain of data.powerDomains) {
+        if (domain.sourceRailRef && !railIds.has(domain.sourceRailRef)) return false;
+        if (domain.railRefs.some((railRef) => !railIds.has(railRef))) return false;
+      }
+      return true;
+    },
+    {
+      message: 'All power domain railRefs must reference valid rails',
+      path: ['powerDomains'],
+    },
+  )
+  .refine(
+    (data) => {
+      const deviceIds = new Set(data.devices.map((device) => device.id));
+      const domainIds = new Set(data.powerDomains.map((domain) => domain.id));
+      for (const device of data.devices) {
+        if (device.powerDomainRef && !domainIds.has(device.powerDomainRef)) return false;
+      }
+      for (const domain of data.powerDomains) {
+        if (domain.loadDeviceRefs.some((deviceRef) => !deviceIds.has(deviceRef))) return false;
+      }
+      return true;
+    },
+    {
+      message: 'All power domain device references must reference valid devices/domains',
+      path: ['powerDomains'],
+    },
+  )
+  .refine(
+    (data) => {
+      const deviceIds = new Set(data.devices.map((device) => device.id));
+      const netNames = new Set(data.nets.map((net) => net.name));
+      const netIds = new Set(data.nets.map((net) => net.id));
+      const railIds = new Set(data.rails.map((rail) => rail.id));
+      const domainIds = new Set(data.powerDomains.map((domain) => domain.id));
+      const signalClassIds = new Set(data.signalClasses.map((signalClass) => signalClass.id));
+      for (const net of data.nets) {
+        if (net.powerDomainRef && !domainIds.has(net.powerDomainRef)) return false;
+        if (net.signalClassRef && !signalClassIds.has(net.signalClassRef)) return false;
+        if (net.railRef && !railIds.has(net.railRef)) return false;
+      }
+      for (const signalClass of data.signalClasses) {
+        if (signalClass.netNames.some((netName) => !netNames.has(netName))) return false;
+        if (signalClass.differentialPair) {
+          if (!netNames.has(signalClass.differentialPair.positiveNet)) return false;
+          if (!netNames.has(signalClass.differentialPair.negativeNet)) return false;
+        }
+      }
+      for (const constraint of data.physicalConstraints) {
+        if (!constraint.targetRef || constraint.targetType === 'board') continue;
+        if (constraint.targetType === 'device' && !deviceIds.has(constraint.targetRef))
+          return false;
+        if (constraint.targetType === 'net' && !netIds.has(constraint.targetRef)) return false;
+        if (
+          constraint.targetType === 'block' &&
+          !new Set(data.blocks.map((block) => block.id)).has(constraint.targetRef)
+        )
+          return false;
+        if (
+          constraint.targetType === 'interface' &&
+          !new Set(data.interfaces.map((iface) => iface.id)).has(constraint.targetRef)
+        )
+          return false;
+      }
+      return true;
+    },
+    {
+      message: 'CircuitIR domain, signal-class, and physical-constraint references must resolve',
+      path: ['signalClasses'],
     },
   );
 
