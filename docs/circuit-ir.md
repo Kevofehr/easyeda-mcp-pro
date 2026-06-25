@@ -136,10 +136,25 @@ User/AI ──► DesignIntent ──► Validate ──► Compile ──► Ci
 3. **Create** `Rail` nodes from power rail requirements
 4. **Stub** `Device` slots (one per block) — users fill in MPNs during planning
 5. **Generate** placeholder `Net` entries for each power rail
-6. **Copy** mechanical constraints into `pcb` fields
-7. **Copy** manufacturing intent into `manufacturing` fields
-8. **Validate** the output CircuitIR (structural + cross-reference checks)
-9. Return draft CircuitIR + original DesignIntent (for traceability)
+6. **Synthesize** professional planning context:
+   - `powerDomains[]` from rails
+   - `signalClasses[]` from power/electrical intent
+   - `physicalConstraints[]` from mechanical and safety intent
+7. **Copy** mechanical constraints into `pcb` fields
+8. **Copy** manufacturing intent into `manufacturing` fields
+9. **Validate** the output CircuitIR (structural + cross-reference checks)
+10. Return draft CircuitIR + original DesignIntent (for traceability)
+
+### Compiler best-practice synthesis
+
+The compiler now creates first-pass electronics planning structures from DesignIntent before any EasyEDA write tool is used:
+
+- each rail becomes a `PowerDomain` with voltage, tolerance, current, rail reference, and traceability;
+- power nets are linked to their rail, power domain, and the `sc-power` signal class;
+- high-frequency electrical requirements create a `sc-high-speed` planning class;
+- board dimensions, mounting holes, and isolation requirements become physical constraints.
+
+These synthesized structures are conservative planning hints. They do not replace human review, ERC/DRC, datasheets, or manufacturing rules; they make those review steps explicit and machine-checkable.
 
 ### Traceability model
 
