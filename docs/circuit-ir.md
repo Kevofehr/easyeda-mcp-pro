@@ -67,17 +67,20 @@ CircuitIR is the **validated, machine-readable source of truth** for downstream 
 
 ### Core node types
 
-| Node                    | Description           | Key fields                                                                              |
-| ----------------------- | --------------------- | --------------------------------------------------------------------------------------- |
-| **Block**               | Functional subsystem  | `id`, `name`, `type`, `description`, `designIntentRef[]`, `children[]`                  |
-| **Device**              | Component instance    | `id`, `ref`, `mpn`, `package`, `blockRef`, `designIntentRef[]`                          |
-| **Net**                 | Electrical connection | `id`, `name`, `type` (power/signal/ground), `nodes[]`, `blockRef`                       |
-| **Rail**                | Power rail            | `id`, `name`, `voltage`, `tolerance`, `maxCurrent`, `sourceBlockRef`, `sinkBlockRefs[]` |
-| **Interface**           | External connector    | `id`, `name`, `type`, `pinout[]`, `blockRef`                                            |
-| **Constraint**          | Design rule           | `id`, `type`, `severity`, `description`, `scope`                                        |
-| **BOMIntent**           | BOM requirements      | `excludeRefs[]`, `preferredVendors[]`, `costTargetUsd`                                  |
-| **PCBIntent**           | PCB constraints       | `layerCount`, `stackup`, `widthMm`, `heightMm`, `material`                              |
-| **ManufacturingIntent** | Fab/assembly          | `quantity`, `process`, `timelineWeeks`                                                  |
+| Node                    | Description              | Key fields                                                                                |
+| ----------------------- | ------------------------ | ----------------------------------------------------------------------------------------- |
+| **Block**               | Functional subsystem     | `id`, `name`, `type`, `description`, `designIntentRef[]`, `children[]`                    |
+| **Device**              | Component instance       | `id`, `ref`, `mpn`, `package`, `blockRef`, `designIntentRef[]`                            |
+| **Net**                 | Electrical connection    | `id`, `name`, `type` (power/signal/ground), `nodes[]`, `blockRef`                         |
+| **Rail**                | Power rail               | `id`, `name`, `voltage`, `tolerance`, `maxCurrent`, `sourceBlockRef`, `sinkBlockRefs[]`   |
+| **PowerDomain**         | Voltage/current domain   | `id`, `name`, `nominalVoltage`, `railRefs[]`, `sourceRailRef`, `loadDeviceRefs[]`         |
+| **SignalClass**         | Routing/electrical class | `id`, `name`, `kind`, `netNames[]`, `differentialPair`, `routing`                         |
+| **PhysicalConstraint**  | Physical/layout rule     | `id`, `type`, `targetType`, `targetRef`, `description`, `minClearanceMm`, `preferredSide` |
+| **Interface**           | External connector       | `id`, `name`, `type`, `pinout[]`, `blockRef`                                              |
+| **Constraint**          | Design rule              | `id`, `type`, `severity`, `description`, `scope`                                          |
+| **BOMIntent**           | BOM requirements         | `excludeRefs[]`, `preferredVendors[]`, `costTargetUsd`                                    |
+| **PCBIntent**           | PCB constraints          | `layerCount`, `stackup`, `widthMm`, `heightMm`, `material`                                |
+| **ManufacturingIntent** | Fab/assembly             | `quantity`, `process`, `timelineWeeks`                                                    |
 
 ### Cross-reference validation
 
@@ -85,7 +88,23 @@ CircuitIR enforces referential integrity:
 
 - Every `NetNode.deviceRef` must reference a valid `Device.id`
 - Every `Device.blockRef` must reference a valid `Block.id`
+- Every `Device.powerDomainRef` must reference a valid `PowerDomain.id`
+- Every `PowerDomain.railRefs[]` and `sourceRailRef` must reference valid `Rail.id` values
+- Every `PowerDomain.loadDeviceRefs[]` item must reference a valid `Device.id`
+- Every `Net.signalClassRef`, `Net.powerDomainRef`, and `Net.railRef` must resolve to known classes/domains/rails
+- Every `SignalClass.netNames[]` and differential pair net must reference known `Net.name` values
+- Every `PhysicalConstraint.targetRef` must resolve to the requested target type, except board-level constraints
 - All IDs must be unique within their type
+
+### Power domains, signal classes, and physical constraints
+
+The expanded CircuitIR model lets an agent reason about professional electronics concerns before writing to EasyEDA:
+
+- `powerDomains[]` groups rails, loads, nominal voltage, current budget, and isolation policy.
+- `signalClasses[]` groups nets by electrical/routing behavior such as analog, digital, USB, RF, sensitive, high-speed, or differential.
+- `physicalConstraints[]` expresses placement, clearance, creepage, height, thermal, keepout, accessibility, and testability requirements.
+
+These objects are intentionally references, not EasyEDA primitives. They give the planner and rule engine enough structure to derive safe schematic, PCB, BOM, and manufacturing actions.
 
 ### Validation lifecycle
 
