@@ -16,5 +16,4 @@ easyeda-bridge-extension.eext
 .agent-state.json
 
 # Extension release artifacts
-easyeda-bridge-extension.eext
 easyeda-bridge-extension.checksums.json
