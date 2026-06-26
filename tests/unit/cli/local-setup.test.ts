@@ -50,6 +50,9 @@ describe('local setup CLI helpers', () => {
       envIssues: [],
       bridgeHost: '127.0.0.1',
       bridgePorts: [{ port: 18601, reachable: true }],
+      pnpmVersion: '9.0.0',
+      toolCounts: { profile: 'core', enabled: 10, total: 20 },
+      vendorsConfigured: { JLCPCB: false, LCSC: true },
     };
 
     expect(formatDoctorReport(report)).toContain('Bridge server: OK reachable on 127.0.0.1:18601');
