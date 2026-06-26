@@ -2,6 +2,11 @@ import { existsSync, readFileSync } from 'node:fs';
 import { connect as createConnection } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { ToolRegistry } from '../tools/registry.js';
+import { registerBuiltinTools } from '../tools/register.js';
+import { type ToolProfile } from '../config/profiles.js';
 import { EnvSchema, type EnvConfig } from '../config/env.js';
 import { parsePortScanSpec } from '../bridge/manager.js';
 
@@ -47,10 +52,13 @@ export interface DoctorReport {
   setup: LocalSetupInfo;
   nodeVersion: string;
   nodeSupported: boolean;
+  pnpmVersion: string | null;
   envValid: boolean;
   envIssues: string[];
   bridgeHost: string;
   bridgePorts: DoctorPortResult[];
+  toolCounts?: { profile: string; enabled: number; total: number };
+  vendorsConfigured: Record<string, boolean>;
 }
 
 export function parseCliArgs(args: string[]): ParsedCliArgs {
@@ -150,6 +158,8 @@ export function formatSetupLocalReport(setup = getLocalSetupInfo()): string {
   ].join('\n');
 }
 
+const execFileAsync = promisify(execFile);
+
 export async function createDoctorReport(
   packageRoot = resolvePackageRoot(),
 ): Promise<DoctorReport> {
@@ -166,14 +176,44 @@ export async function createDoctorReport(
     });
   }
 
+  let pnpmVersion = null;
+  try {
+    const { stdout } = await execFileAsync('pnpm', ['--version']);
+    pnpmVersion = stdout.trim();
+  } catch {
+    // Ignore if pnpm is not found
+  }
+
+  let toolCounts = undefined;
+  if (env.config) {
+    const registry = new ToolRegistry();
+    registry.setProfile(env.config.TOOL_PROFILE as ToolProfile);
+    registerBuiltinTools(registry, env.config);
+    toolCounts = {
+      profile: env.config.TOOL_PROFILE,
+      enabled: registry.getEnabledTools().length,
+      total: registry.getAllTools().length,
+    };
+  }
+
+  const vendorsConfigured: Record<string, boolean> = {
+    JLCPCB: Boolean(env.config?.JLCPCB_CLIENT_ID && env.config?.JLCPCB_CLIENT_SECRET),
+    LCSC: Boolean(env.config?.LCSC_API_KEY && env.config?.LCSC_API_SECRET),
+    MOUSER: Boolean(env.config?.MOUSER_API_KEY),
+    DIGIKEY: Boolean(env.config?.DIGIKEY_CLIENT_ID && env.config?.DIGIKEY_CLIENT_SECRET),
+  };
+
   return {
     setup,
     nodeVersion: process.versions.node,
     nodeSupported: isSupportedNodeVersion(process.versions.node),
+    pnpmVersion,
     envValid: env.issues.length === 0,
     envIssues: env.issues,
     bridgeHost,
     bridgePorts,
+    toolCounts,
+    vendorsConfigured,
   };
 }
 
@@ -183,14 +223,25 @@ export function formatDoctorReport(report: DoctorReport): string {
     ? `reachable on ${report.bridgeHost}:${reachable.port}`
     : `offline on ${report.bridgeHost}:${report.bridgePorts.map((port) => port.port).join(',')}`;
 
+  const vendors = Object.entries(report.vendorsConfigured)
+    .map(([name, isConfigured]) => `${name}: ${isConfigured ? 'configured' : 'missing'}`)
+    .join(', ');
+
+  const toolsStr = report.toolCounts
+    ? `Profile '${report.toolCounts.profile}' with ${report.toolCounts.enabled} / ${report.toolCounts.total} tools enabled`
+    : 'Unknown tool configuration';
+
   return [
     'easyeda-mcp-pro doctor',
     '',
     `Node.js: ${status(report.nodeSupported)} ${report.nodeVersion} (supported: >=24 <27)`,
+    `pnpm: ${report.pnpmVersion ? 'OK ' + report.pnpmVersion : 'MISSING'}`,
     `Environment: ${status(report.envValid)}${report.envIssues.length ? ` ${report.envIssues.join('; ')}` : ''}`,
     `MCP server entry: ${status(report.setup.serverEntryExists)} ${report.setup.serverEntryPath}`,
     `EasyEDA extension package: ${status(report.setup.extensionPackageExists)} ${report.setup.extensionPackagePath}`,
     `Bridge server: ${reachable ? 'OK' : 'INFO'} ${bridgeStatus}`,
+    `Tools: ${toolsStr}`,
+    `Vendors: ${vendors}`,
     '',
     reachable
       ? 'Bridge server is running. If EasyEDA is not connected, reload the extension and click MCP Bridge > Connect.'
