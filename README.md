@@ -431,13 +431,13 @@ Configure an AI provider for LLM-assisted design review:
 
 When using `TRANSPORT=http`:
 
-| Variable              | Default     | Description                               |
-| --------------------- | ----------- | ----------------------------------------- |
-| `HTTP_HOST`           | `127.0.0.1` | Bind address (use `0.0.0.0` with caution) |
-| `HTTP_PORT`           | `3000`      | Port                                      |
-| `HTTP_AUTH_DISABLED`  | `false`     | Disable HTTP transport authentication     |
-| `HTTP_RATE_LIMIT_MAX` | `100`       | Max requests per minute per IP            |
-| `CORS_ORIGIN`         | `''`        | Allowed CORS origin                       |
+| Variable              | Default     | Description                                        |
+| --------------------- | ----------- | -------------------------------------------------- |
+| `HTTP_HOST`           | `127.0.0.1` | Bind address (use `0.0.0.0` with caution)          |
+| `HTTP_PORT`           | `3000`      | Port                                               |
+| `HTTP_AUTH_DISABLED`  | `false`     | Disable HTTP auth for non-production loopback only |
+| `HTTP_RATE_LIMIT_MAX` | `100`       | Max requests per minute per IP                     |
+| `CORS_ORIGIN`         | `''`        | Allowed CORS origin                                |
 
 #### Production HTTP Security
 
@@ -451,9 +451,9 @@ For remote HTTP deployments, OAuth 2.0 / OpenID Connect is strongly recommended:
 | `OAUTH_JWKS_URI`        | `''`              | JWKS endpoint for token signature validation |
 | `OAUTH_REQUIRED_SCOPES` | `easyeda:read`    | Required token scope                         |
 
-When `OAUTH_ENABLED=true`, every request to `/mcp` must include an `Authorization: Bearer <token>` header. Tokens are validated against the JWKS endpoint if configured, or structurally validated otherwise.
+When `OAUTH_ENABLED=true`, every request to `/mcp` must include an `Authorization: Bearer <token>` header unless `HTTP_AUTH_DISABLED=true` is explicitly set for non-production loopback development. Tokens are verified against `OAUTH_JWKS_URI`, `iss`/`aud` claims are validated, and `OAUTH_REQUIRED_SCOPES` is enforced against `scope`, `scp`, `permissions`, or `roles` claims.
 
-The server enforces a safety check at startup: **non-loopback `HTTP_HOST` without OAuth is rejected**.
+The server enforces startup safety checks: **non-loopback `HTTP_HOST` without OAuth is rejected**, and `HTTP_AUTH_DISABLED=true` is rejected outside non-production loopback deployments.
 
 #### HTTP Security Features
 

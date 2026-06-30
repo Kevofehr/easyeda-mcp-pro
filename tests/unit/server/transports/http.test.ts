@@ -7,6 +7,7 @@ import {
   handleCorsPreflight,
   isLoopback,
   parseOriginAllowlist,
+  validateMcpProtocolVersion,
 } from '../../../../src/server/transports/http.js';
 import type { Request, Response, NextFunction } from 'express';
 import * as http from 'node:http';
@@ -19,11 +20,11 @@ function mockReqRes(overrides: Partial<Request> = {}): {
   next: NextFunction;
 } {
   const headers: Record<string, string | string[] | undefined> = {};
+  const { headers: overrideHeaders, ...restOverrides } = overrides;
   const req = {
-    headers,
     method: 'GET',
-    ...overrides,
-    headers: { ...headers, ...(overrides.headers || {}) },
+    ...restOverrides,
+    headers: { ...headers, ...(overrideHeaders || {}) },
   } as Request;
 
   const status = vi.fn().mockReturnThis();
@@ -66,6 +67,9 @@ interface OAuthTestContext {
     sub?: string;
     typ?: string;
     alg?: string;
+    scope?: string;
+    scp?: string[];
+    permissions?: string[];
   }) => Promise<string>;
 }
 
@@ -92,8 +96,15 @@ async function createOAuthContext(): Promise<OAuthTestContext> {
     sub = 'test-user',
     typ = 'JWT',
     alg = 'RS256',
+    scope = 'easyeda:read',
+    scp,
+    permissions,
   }) => {
-    const signer = new SignJWT({ sub })
+    const payload: Record<string, unknown> = { sub, scope };
+    if (scp !== undefined) payload.scp = scp;
+    if (permissions !== undefined) payload.permissions = permissions;
+
+    const signer = new SignJWT(payload)
       .setProtectedHeader({ alg, typ })
       .setIssuer(issuer)
       .setAudience(audience)
@@ -231,7 +242,9 @@ describe('createHttpTransport', () => {
       const res = await fetch('http://127.0.0.1:3897/healthz', { method: 'OPTIONS' });
       expect(res.status).toBe(204);
       expect(res.headers.get('access-control-allow-methods')).toBe('GET, POST, OPTIONS');
-      expect(res.headers.get('access-control-allow-headers')).toBe('Content-Type, Authorization');
+      expect(res.headers.get('access-control-allow-headers')).toBe(
+        'Content-Type, Authorization, MCP-Protocol-Version',
+      );
       expect(res.headers.get('access-control-max-age')).toBe('86400');
       expect(res.headers.get('vary')).toBe('Origin');
     } finally {
@@ -504,6 +517,64 @@ describe('createOriginValidator', () => {
   });
 });
 
+describe('validateMcpProtocolVersion', () => {
+  it('should pass through non-MCP requests', () => {
+    const config = createTestConfig({ MCP_PROTOCOL_VERSION: '2025-11-25' });
+    const middleware = validateMcpProtocolVersion(config);
+    const { req, res, next } = mockReqRes({ path: '/healthz' });
+
+    middleware(req, res, next);
+
+    expect(next).toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  it('should allow MCP requests without a protocol-version header for compatibility', () => {
+    const config = createTestConfig({ MCP_PROTOCOL_VERSION: '2025-11-25' });
+    const middleware = validateMcpProtocolVersion(config);
+    const { req, res, next } = mockReqRes({ path: '/mcp' });
+
+    middleware(req, res, next);
+
+    expect(next).toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  it('should allow MCP requests with the configured protocol version', () => {
+    const config = createTestConfig({ MCP_PROTOCOL_VERSION: '2025-11-25' });
+    const middleware = validateMcpProtocolVersion(config);
+    const { req, res, next } = mockReqRes({
+      path: '/mcp',
+      headers: { 'mcp-protocol-version': '2025-11-25' },
+    });
+
+    middleware(req, res, next);
+
+    expect(next).toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  it('should reject MCP requests with an unsupported protocol version', () => {
+    const config = createTestConfig({ MCP_PROTOCOL_VERSION: '2025-11-25' });
+    const middleware = validateMcpProtocolVersion(config);
+    const { req, res, next } = mockReqRes({
+      path: '/mcp',
+      headers: { 'mcp-protocol-version': '2024-11-05' },
+    });
+
+    middleware(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      error: 'Unsupported MCP protocol version',
+      code: 'unsupported_protocol_version',
+      supportedVersion: '2025-11-25',
+      requestedVersion: '2024-11-05',
+    });
+    expect(next).not.toHaveBeenCalled();
+  });
+});
+
 describe('handleCorsPreflight', () => {
   it('should respond 204 for OPTIONS request', () => {
     const { req, res, next } = mockReqRes({ method: 'OPTIONS' });
@@ -516,7 +587,7 @@ describe('handleCorsPreflight', () => {
     );
     expect(res.setHeader).toHaveBeenCalledWith(
       'Access-Control-Allow-Headers',
-      'Content-Type, Authorization',
+      'Content-Type, Authorization, MCP-Protocol-Version',
     );
     expect(res.setHeader).toHaveBeenCalledWith('Access-Control-Max-Age', '86400');
     expect(res.end).toHaveBeenCalled();
@@ -701,6 +772,53 @@ describe('createHttpTransport — OAuth/JWKS validation', () => {
       const res = await fetchWithPort(port, {
         headers: { Authorization: `Bearer ${token}` },
       });
+      expect(res.status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('should reject valid token without the required OAuth scope', async () => {
+    const { server, port } = await createOAuthApp();
+    const token = await ctx.signToken({ scope: '' });
+    try {
+      const res = await fetchWithPort(port, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as {
+        error: string;
+        code: string;
+        requiredScopes: string[];
+        missingScopes: string[];
+      };
+      expect(body.code).toBe('insufficient_scope');
+      expect(body.requiredScopes).toEqual(['easyeda:read']);
+      expect(body.missingScopes).toEqual(['easyeda:read']);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('should accept required scopes from scp array claim', async () => {
+    const { server, port } = await createOAuthApp({
+      OAUTH_REQUIRED_SCOPES: 'easyeda:read easyeda:write',
+    });
+    const token = await ctx.signToken({ scope: '', scp: ['easyeda:read', 'easyeda:write'] });
+    try {
+      const res = await fetchWithPort(port, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('should bypass OAuth only when HTTP_AUTH_DISABLED is true', async () => {
+    const { server, port } = await createOAuthApp({ HTTP_AUTH_DISABLED: true });
+    try {
+      const res = await fetchWithPort(port);
       expect(res.status).toBe(200);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));

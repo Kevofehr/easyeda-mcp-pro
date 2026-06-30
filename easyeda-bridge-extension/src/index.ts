@@ -30,12 +30,7 @@ function getInfoToastType(): string {
 }
 
 type JsonValue =
-  | string
-  | number
-  | boolean
-  | null
-  | JsonValue[]
-  | { [key: string]: JsonValue | undefined };
+  string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue | undefined };
 
 type ConnectMode = 'manual' | 'auto';
 type ConnectionState = 'disconnected' | 'connecting' | 'connected';

@@ -28,7 +28,7 @@ import {
   RESERVED_NET_NAMES,
   NetDomain,
 } from './schema.js';
-import type { NetValidationInput, NetValidationEntry } from './schema.js';
+import type { InterfaceValidationEntry, NetValidationInput, NetValidationEntry } from './schema.js';
 import type { NetValidationIssue } from './errors.js';
 
 // ── Rule: floating nets ────────────────────────────────────────────────────
@@ -63,10 +63,9 @@ function checkDuplicateNetNames(input: NetValidationInput): NetValidationIssue[]
 
   for (const net of input.nets) {
     const normalised = net.name.toUpperCase();
-    if (!nameMap.has(normalised)) {
-      nameMap.set(normalised, []);
-    }
-    nameMap.get(normalised)!.push(net);
+    const existing = nameMap.get(normalised) ?? [];
+    existing.push(net);
+    nameMap.set(normalised, existing);
   }
 
   for (const [name, nets] of nameMap) {
@@ -99,10 +98,9 @@ function checkAccidentalShorts(input: NetValidationInput): NetValidationIssue[] 
   for (const net of input.nets) {
     for (const node of net.nodes) {
       const key = `${node.deviceRef}:${node.pin}`;
-      if (!pinToNets.has(key)) {
-        pinToNets.set(key, []);
-      }
-      pinToNets.get(key)!.push(net);
+      const existing = pinToNets.get(key) ?? [];
+      existing.push(net);
+      pinToNets.set(key, existing);
     }
   }
 
@@ -294,26 +292,29 @@ function checkCrossSheetConsistency(input: NetValidationInput): NetValidationIss
   const byName = new Map<string, typeof input.interfaces>();
   for (const intf of input.interfaces) {
     const key = intf.name.toUpperCase();
-    if (!byName.has(key)) {
-      byName.set(key, []);
-    }
-    byName.get(key)!.push(intf);
+    const existing = byName.get(key) ?? [];
+    existing.push(intf);
+    byName.set(key, existing);
   }
 
   for (const [name, group] of byName) {
     if (group.length < 2) continue;
 
     // Compare all interfaces with the same name (group.length >= 2 here)
-    const reference = group[0]!;
-    for (let i = 1; i < group.length; i++) {
-      const other = group[i]!;
+    const [reference, ...others] = group as [
+      InterfaceValidationEntry,
+      ...InterfaceValidationEntry[],
+    ];
+
+    for (const [index, other] of others.entries()) {
+      const instanceNumber = index + 2;
 
       // Check pin count matches
       if (reference.pinout.length !== other.pinout.length) {
         issues.push(
           netError(
             NetValidationCode.NetInconsistentCrossSheet,
-            `Interface "${name}" has inconsistent pin counts: sheet 1 has ${reference.pinout.length} pins, sheet ${i + 1} has ${other.pinout.length} pins`,
+            `Interface "${name}" has inconsistent pin counts: sheet 1 has ${reference.pinout.length} pins, sheet ${instanceNumber} has ${other.pinout.length} pins`,
             {
               remediationHint: 'Ensure all instances of this interface have the same pinout',
               details: {
@@ -328,9 +329,9 @@ function checkCrossSheetConsistency(input: NetValidationInput): NetValidationIss
       }
 
       // Check individual pin names match
-      for (let j = 0; j < reference.pinout.length; j++) {
-        const refPin = reference.pinout[j]!;
-        const otherPin = other.pinout[j]!;
+      for (const [j, refPin] of reference.pinout.entries()) {
+        const otherPin = other.pinout[j];
+        if (otherPin === undefined) continue;
         if (refPin.signal.toUpperCase() !== otherPin.signal.toUpperCase()) {
           issues.push(
             netError(
