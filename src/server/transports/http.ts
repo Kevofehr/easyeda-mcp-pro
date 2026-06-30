@@ -64,10 +64,40 @@ function tokenError(res: Response, message: string, code = 'invalid_token'): voi
   res.status(401).json({ error: message, code });
 }
 
+function parseScopeList(raw: string): string[] {
+  return raw
+    .split(/[\s,]+/)
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+}
+
+function extractTokenScopes(payload: Record<string, unknown>): Set<string> {
+  const scopes = new Set<string>();
+  const addScope = (scope: unknown): void => {
+    if (typeof scope === 'string') {
+      for (const item of parseScopeList(scope)) scopes.add(item);
+    }
+  };
+
+  addScope(payload.scope);
+  addScope(payload.scp);
+
+  for (const claimName of ['scp', 'permissions', 'roles']) {
+    const claim = payload[claimName];
+    if (Array.isArray(claim)) {
+      for (const item of claim) addScope(item);
+    }
+  }
+
+  return scopes;
+}
+
 function validateOAuthToken(config: EnvConfig) {
-  if (!config.OAUTH_ENABLED) {
+  if (!config.OAUTH_ENABLED || config.HTTP_AUTH_DISABLED) {
     return (_req: Request, _res: Response, next: NextFunction): void => next();
   }
+
+  const requiredScopes = parseScopeList(config.OAUTH_REQUIRED_SCOPES);
 
   // The config validator already ensures OAUTH_JWKS_URI is present when OAuth is enabled.
   // We cache the JWKSet for the lifetime of the server.
@@ -99,6 +129,20 @@ function validateOAuthToken(config: EnvConfig) {
         if (typ !== undefined && !SUPPORTED_TOKEN_TYPES.has(typ)) {
           tokenError(res, `Unsupported token type: ${typ}`, 'unsupported_token_type');
           return;
+        }
+
+        if (requiredScopes.length > 0) {
+          const tokenScopes = extractTokenScopes(payload as Record<string, unknown>);
+          const missingScopes = requiredScopes.filter((scope) => !tokenScopes.has(scope));
+          if (missingScopes.length > 0) {
+            res.status(403).json({
+              error: 'Token is missing required OAuth scope',
+              code: 'insufficient_scope',
+              requiredScopes,
+              missingScopes,
+            });
+            return;
+          }
         }
 
         res.locals.claims = payload;
@@ -252,13 +296,40 @@ export function createOriginValidator(config: EnvConfig) {
   };
 }
 
+export function validateMcpProtocolVersion(config: EnvConfig) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const requestPath = req.path || req.url || '';
+    if (!requestPath.startsWith('/mcp')) {
+      next();
+      return;
+    }
+
+    const header = req.headers['mcp-protocol-version'];
+    const requestedVersion = Array.isArray(header) ? header[0] : header;
+    if (requestedVersion === undefined || requestedVersion === config.MCP_PROTOCOL_VERSION) {
+      next();
+      return;
+    }
+
+    res.status(400).json({
+      error: 'Unsupported MCP protocol version',
+      code: 'unsupported_protocol_version',
+      supportedVersion: config.MCP_PROTOCOL_VERSION,
+      requestedVersion,
+    });
+  };
+}
+
 /** CORS preflight handler for OPTIONS requests. */
 export function handleCorsPreflight(req: Request, res: Response, next: NextFunction): void {
   if (req.method === 'OPTIONS') {
     // Vary: Origin tells caches that the response varies by the Origin header.
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      'Content-Type, Authorization, MCP-Protocol-Version',
+    );
     res.setHeader('Access-Control-Max-Age', '86400');
     res.status(204).end();
     return;
@@ -292,6 +363,7 @@ export function createHttpTransport(config: EnvConfig): HttpTransportInstance {
   // preflight can complete without a bearer token while still enforcing origin.
   app.use(createOriginValidator(config));
   app.use(handleCorsPreflight);
+  app.use(validateMcpProtocolVersion(config));
 
   app.use(validateOAuthToken(config));
 

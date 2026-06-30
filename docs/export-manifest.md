@@ -130,12 +130,8 @@ const result = validateExportManifest({
   version: '1.0.0',
   sourceProjectId: 'proj-abc-123',
   generatedAt: '2026-06-11T21:00:00.000Z',
-  artifacts: [
-    /* ... entries ... */
-  ],
-  expectedArtifacts: [
-    /* ... expectations ... */
-  ],
+  artifacts: [/* ... entries ... */],
+  expectedArtifacts: [/* ... expectations ... */],
 });
 
 if (!result.valid) {

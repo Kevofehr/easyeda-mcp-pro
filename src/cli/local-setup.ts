@@ -11,14 +11,7 @@ import { EnvSchema, type EnvConfig } from '../config/env.js';
 import { parsePortScanSpec } from '../bridge/manager.js';
 
 type CliCommand =
-  | 'server'
-  | 'setup-local'
-  | 'setup'
-  | 'extension'
-  | 'doctor'
-  | 'help'
-  | 'version'
-  | 'init';
+  'server' | 'setup-local' | 'setup' | 'extension' | 'doctor' | 'help' | 'version' | 'init';
 
 export interface ParsedCliArgs {
   command: CliCommand;

@@ -46,11 +46,7 @@ export interface SupplierQueryResult {
 
 /** Issue type identifiers for the BOM quality report. */
 export type BomQualityIssueType =
-  | 'unavailable'
-  | 'single_source'
-  | 'missing_mpn'
-  | 'missing_footprint'
-  | 'low_stock';
+  'unavailable' | 'single_source' | 'missing_mpn' | 'missing_footprint' | 'low_stock';
 
 /** A single quality issue found for a BOM entry. */
 export interface BomQualityIssue {
