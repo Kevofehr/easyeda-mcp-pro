@@ -5,6 +5,7 @@ import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+import { format } from 'prettier';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -109,15 +110,15 @@ function generateMarkdown(): string {
   return md.join('\n');
 }
 
-function main() {
+async function main() {
   const destDir = join(__dirname, '..', 'docs', 'reference');
   if (!existsSync(destDir)) {
     mkdirSync(destDir, { recursive: true });
   }
 
-  const content = generateMarkdown();
+  const content = await format(generateMarkdown(), { parser: 'markdown' });
   writeFileSync(join(destDir, 'tools.md'), content, 'utf8');
   console.log('Successfully generated docs/reference/tools.md');
 }
 
-main();
+void main();

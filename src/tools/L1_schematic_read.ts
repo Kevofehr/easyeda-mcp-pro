@@ -331,7 +331,7 @@ function registerSchematicReadTools(
           },
         );
         const resultObj = result as { result?: Array<Record<string, unknown>> } | undefined;
-        const pins = Array.isArray(resultObj?.result) ? resultObj!.result : [];
+        const pins = Array.isArray(resultObj?.result) ? resultObj.result : [];
         return {
           primitiveId,
           pins: pins.map((p: Record<string, unknown>) => {

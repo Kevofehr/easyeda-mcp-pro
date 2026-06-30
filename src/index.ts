@@ -8,6 +8,7 @@ import {
   parseCliArgs,
 } from './cli/local-setup.js';
 import { runExtension, runSetup, runInteractiveInit } from './cli/auto-setup.js';
+import type { SetupOptions } from './cli/client-definitions.js';
 import { loadEnvConfig } from './config/env.js';
 import { createServer } from './server/factory.js';
 import { createHttpTransport } from './server/transports/http.js';
@@ -22,7 +23,7 @@ async function main() {
 
   if (cli.command === 'setup') {
     process.stdout.write(
-      `${runSetup({ client: cli.setupClient as any, profile: cli.setupProfile })}\n`,
+      `${runSetup({ client: cli.setupClient as SetupOptions['client'], profile: cli.setupProfile })}\n`,
     );
     return;
   }

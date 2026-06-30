@@ -34,16 +34,23 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+      - run: pnpm audit --audit-level low
+      - run: pnpm peers check
       - run: pnpm format:check
       - run: pnpm typecheck
       - run: pnpm typecheck:extension
       - run: pnpm lint
       - run: pnpm lint:tools
+      - run: pnpm verify:tool-coverage
       - run: pnpm test
+      - run: pnpm test:coverage
       - run: pnpm build
       - run: pnpm check:metadata
       - run: pnpm build:extension
       - run: pnpm verify:extension
+      - run: pnpm generate:tools-doc
+      - run: git diff --exit-code docs/reference/tools.md
+      - run: pnpm docs:build
 
   codeql:
     if: (github.repository_owner == 'oaslananka' || github.repository_owner == 'oaslananka-ops') && (github.event_name == 'push' || github.event_name == 'pull_request')

@@ -110,6 +110,13 @@
           "default": "false"
         },
         {
+          "name": "MCP_RAW_EXEC_EXPERIMENTAL",
+          "description": "Enable experimental raw EasyEDA runtime execution gate (dangerous; requires BRIDGE_RAW_EXEC_ENABLED)",
+          "isRequired": false,
+          "format": "boolean",
+          "default": "false"
+        },
+        {
           "name": "BRIDGE_HOST",
           "description": "Bridge WebSocket host for EasyEDA Pro connection",
           "isRequired": false,

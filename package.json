@@ -53,7 +53,7 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "typecheck:extension": "pnpm --filter @easyeda-mcp-pro/bridge-extension typecheck",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings 0",
     "lint:tools": "tsx scripts/lint-tool-metadata.mts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -78,22 +78,23 @@
     "dotenv": "^17.4.2",
     "jose": "^6.2.3",
     "pino": "^10.3.1",
-    "undici": "^8.4.1",
+    "undici": "^8.5.0",
     "ws": "^8.21.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@jlceda/pro-api-types": "^0.2.57",
+    "@jlceda/pro-api-types": "^0.2.66",
     "@types/express": "^5.0.6",
     "@types/node": "^24.13.2",
     "@types/ws": "^8.18.1",
-    "eslint": "^10.4.1",
-    "prettier": "^3.8.4",
+    "@vitest/coverage-v8": "^4.1.9",
+    "eslint": "^10.6.0",
+    "prettier": "^3.9.4",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.61.0",
+    "typescript-eslint": "^8.62.1",
     "vitepress": "^1.6.4",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.9"
   }
 }
