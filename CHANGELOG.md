@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.1](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.6.0...easyeda-mcp-pro-v0.6.1) (2026-06-30)
+
+
+### Bug Fixes
+
+* repair Docker and MCP registry publishing ([3309e2a](https://github.com/oaslananka/easyeda-mcp-pro/commit/3309e2af6b13a30118a4c225f40a0be3a2c0ff13))
+* repair Docker and MCP registry publishing ([4c76d5b](https://github.com/oaslananka/easyeda-mcp-pro/commit/4c76d5b4bc5124a24c493188dc64c6e6d731c26d))
+
 ## [0.6.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.5.3...easyeda-mcp-pro-v0.6.0) (2026-06-30)
 
 
