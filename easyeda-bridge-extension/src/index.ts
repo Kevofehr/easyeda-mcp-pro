@@ -1020,6 +1020,35 @@ async function connectPinToNetImpl(
       );
     }
   }
+
+  // Establish REAL EasyEDA connectivity: draw a net-named wire stub whose first
+  // endpoint sits on the pin. EasyEDA assigns that pin to `netName`, and pins
+  // that share a net name form one net. The OtherProperty.net set above only
+  // feeds this bridge's own listNetsApi(); the EasyEDA netlister ignores it, so
+  // the wire is what actually connects the pin for ERC / PCB / netlist export.
+  try {
+    const px =
+      typeof targetPin.getState_X === 'function' ? Number(targetPin.getState_X()) : NaN;
+    const py =
+      typeof targetPin.getState_Y === 'function' ? Number(targetPin.getState_Y()) : NaN;
+    if (Number.isFinite(px) && Number.isFinite(py)) {
+      const rot =
+        typeof targetPin.getState_Rotation === 'function'
+          ? Number(targetPin.getState_Rotation())
+          : 0;
+      const rad = (rot * Math.PI) / 180;
+      const STUB = 20;
+      const ex = Math.round(px + STUB * Math.cos(rad));
+      const ey = Math.round(py + STUB * Math.sin(rad));
+      await callFirst(
+        ['SCH_PrimitiveWire.create', 'sch_PrimitiveWire.create'],
+        [px, py, ex, ey],
+        netName,
+      );
+    }
+  } catch (e) {
+    logRecoverableError('connectPinToNet: wire-stub creation failed', e);
+  }
 }
 
 // Resolve a user-supplied schematic component reference — which may be either a
@@ -1163,16 +1192,23 @@ async function dispatch(method: string, params: Record<string, unknown> = {}): P
       const nfY = params.y as number;
       const nfName = params.netName as string;
       const nfRotation = (params.rotation as number) ?? 0;
+      // Real EasyEDA API is SCH_PrimitiveComponent.createNetFlag(identification,
+      // net, x, y, rotation?, mirror?) — identification ∈ Power | Ground |
+      // AnalogGround | ProtectGround. Infer it from the net name.
+      const nfUpper = String(nfName).toUpperCase();
+      const nfId = /^A(?:GND|NALOG)|ANALOG_?GND/.test(nfUpper)
+        ? 'AnalogGround'
+        : /PGND|PROTECT|EARTH|CHASSIS/.test(nfUpper)
+          ? 'ProtectGround'
+          : /GND|GROUND|VSS|VEE/.test(nfUpper)
+            ? 'Ground'
+            : 'Power';
       const nfResult = await callFirst(
-        [
-          'SCH_PrimitiveNetLabel.create',
-          'sch_PrimitiveNetLabel.create',
-          'SCH_NetFlag.create',
-          'sch_NetFlag.create',
-        ],
+        ['SCH_PrimitiveComponent.createNetFlag', 'sch_PrimitiveComponent.createNetFlag'],
+        nfId,
+        nfName,
         nfX,
         nfY,
-        nfName,
         nfRotation,
       );
       const nfPrimitiveId =
@@ -1192,19 +1228,17 @@ async function dispatch(method: string, params: Record<string, unknown> = {}): P
       const npX = params.x as number;
       const npY = params.y as number;
       const npName = params.netName as string;
-      const npType = (params.portType as string) ?? 'passive';
+      const npType = String((params.portType as string) ?? 'passive').toLowerCase();
       const npRotation = (params.rotation as number) ?? 0;
+      // Real EasyEDA API is SCH_PrimitiveComponent.createNetPort(direction, net,
+      // x, y, rotation?, mirror?) — direction ∈ IN | OUT | BI.
+      const npDir = npType === 'output' ? 'OUT' : npType === 'input' ? 'IN' : 'BI';
       const npResult = await callFirst(
-        [
-          'SCH_PrimitiveNetPort.create',
-          'sch_PrimitiveNetPort.create',
-          'SCH_NetPort.create',
-          'sch_NetPort.create',
-        ],
+        ['SCH_PrimitiveComponent.createNetPort', 'sch_PrimitiveComponent.createNetPort'],
+        npDir,
+        npName,
         npX,
         npY,
-        npName,
-        npType,
         npRotation,
       );
       const npPrimitiveId =
@@ -2260,7 +2294,7 @@ async function toggleAutoConnect(): Promise<void> {
 }
 
 async function handleActivate(): Promise<void> {
-  logPanel('extension active — build 0.5.7 (designator writes + de-hang reads + Log diagnostics + SYS_/PNL_ api.call access)');
+  logPanel('extension active — build 0.5.8 (real net connectivity: connect_pins_by_net wire-stubs + fixed createNetFlag/createNetPort)');
   autoConnectEnabled = loadAutoConnectSetting();
   if (autoConnectEnabled) {
     showToast(`MCP Bridge: Auto-Connect ON — scanning 127.0.0.1:${PORT_SCAN_LABEL}`);
