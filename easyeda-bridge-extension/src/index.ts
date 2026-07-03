@@ -108,7 +108,7 @@ interface SocketHandle {
 }
 
 const BRIDGE_PROTOCOL = 'easyeda-mcp-pro.bridge';
-const BRIDGE_VERSION = '1.0.0';
+const BRIDGE_VERSION = '1.1.0';
 const BRIDGE_CONTRACT_VERSION = 1;
 const BRIDGE_PORT = 49620;
 const PORT_SCAN_COUNT = 10;
@@ -271,6 +271,134 @@ async function callFirst(paths: string[], ...args: unknown[]): Promise<unknown> 
     `No EasyEDA API implementation found for ${paths.join(' or ')}`,
     'Verify the bridge extension supports the installed EasyEDA Pro version.',
   );
+}
+
+// ---------------------------------------------------------------------------
+// PCB authoring helpers (build 0.6.0)
+//
+// All signatures below are confirmed against @jlceda/pro-api-types (the official
+// EasyEDA Pro extension API typings). The runtime accessor is eda.pcb_<Class>;
+// callFirst() + withClassNameVariants() try both PCB_ and pcb_ casings, so the
+// canonical 'PCB_<Class>.<method>' candidate resolves at runtime.
+// ---------------------------------------------------------------------------
+
+// EPCB_LayerId values used as the `layer` argument on create(...).
+const PCB_LAYER = {
+  TOP: 1,
+  BOTTOM: 2,
+  TOP_SILK: 3,
+  BOTTOM_SILK: 4,
+  BOARD_OUTLINE: 11,
+  MULTI: 12,
+  DOCUMENT: 13,
+  MECHANICAL: 14,
+} as const;
+
+// Accept either nested [[x,y],...] or flat [x,y,x,y,...] and return [x,y] pairs.
+function toXYPairs(points: unknown): Array<[number, number]> {
+  if (!Array.isArray(points)) return [];
+  if (points.length > 0 && Array.isArray(points[0])) {
+    return (points as unknown[][]).map((p) => [Number(p[0]), Number(p[1])] as [number, number]);
+  }
+  const flat = (points as unknown[]).map(Number);
+  const pairs: Array<[number, number]> = [];
+  for (let i = 0; i + 1 < flat.length; i += 2) pairs.push([flat[i], flat[i + 1]]);
+  return pairs;
+}
+
+// Normalize a create(...) result (an IPCB_Primitive* instance or id string) to
+// a { primitiveId } shape for the MCP layer.
+function pcbId(result: unknown, prefix: string): { primitiveId: string } {
+  let id = '';
+  if (typeof result === 'string') {
+    id = result;
+  } else if (result && typeof result === 'object') {
+    const r = result as Record<string, unknown>;
+    const getter = r.getState_PrimitiveId;
+    const fromGetter = typeof getter === 'function' ? (getter as () => unknown).call(r) : undefined;
+    id = String(r.primitiveId ?? r.uuid ?? r.id ?? fromGetter ?? '');
+  }
+  return { primitiveId: id || `${prefix}_${Date.now()}` };
+}
+
+// Throw a clear bridge error if any provided coordinate/size is non-finite (e.g.
+// NaN from a missing field), so we never author garbage geometry that then
+// silently "succeeds".
+function assertFinite(context: string, values: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(values)) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw newBridgeError(
+        'INVALID_GEOMETRY',
+        `${context}: '${key}' is not a finite number (got ${String(value)}).`,
+        'Provide every coordinate/size field required for this shape.',
+      );
+    }
+  }
+}
+
+// Build an EasyEDA TPCB_PolygonSourceArray from a shape descriptor. Grammar (per
+// the official typings): polygon = [x1,y1,'L',x2,y2,...]; rect = ['R',x,y,w,h,rot,round];
+// circle = ['CIRCLE',cx,cy,r]. A single polygon auto-closes. Throws on a
+// degenerate (<3-point) polygon or any non-finite coordinate.
+function polygonSource(shape: string, p: Record<string, unknown>): Array<string | number> {
+  let src: Array<string | number>;
+  if (shape === 'circle') {
+    src = ['CIRCLE', Number(p.cx), Number(p.cy), Number(p.radius)];
+  } else if (shape === 'rect') {
+    src = [
+      'R',
+      Number(p.x),
+      Number(p.y),
+      Number(p.width),
+      Number(p.height),
+      Number(p.rotation ?? 0),
+      Number(p.round ?? 0),
+    ];
+  } else {
+    const pairs = toXYPairs(p.points);
+    if (pairs.length < 3) {
+      throw newBridgeError(
+        'INVALID_POLYGON',
+        `polygon region needs at least 3 points (got ${pairs.length}).`,
+        'Pass a points array describing a closed area.',
+      );
+    }
+    src = [];
+    pairs.forEach(([x, y], i) => {
+      if (i === 0) src.push(x, y, 'L');
+      else src.push(x, y);
+    });
+  }
+  for (const v of src) {
+    if (typeof v === 'number' && !Number.isFinite(v)) {
+      throw newBridgeError(
+        'INVALID_GEOMETRY',
+        `${shape} region has a non-finite coordinate (${String(v)}).`,
+        'Provide every coordinate/size field required for this shape.',
+      );
+    }
+  }
+  return src;
+}
+
+// Build an IPCB_Polygon (the complexPolygon/polygon arg for Fill/Pour/Region/
+// Polyline) via eda.pcb_MathPolygon.createPolygon. Throws INVALID_POLYGON if the
+// runtime cannot build a polygon, rather than passing a raw source array that
+// PCB_PrimitivePour/Fill.create (which require an IPCB_Polygon) would reject.
+async function buildPolygon(shape: string, p: Record<string, unknown>): Promise<unknown> {
+  const source = polygonSource(shape, p);
+  const poly = await callFirst(
+    ['PCB_MathPolygon.createPolygon', 'pcb_MathPolygon.createPolygon'],
+    source,
+  );
+  if (!poly) {
+    throw newBridgeError(
+      'INVALID_POLYGON',
+      `pcb_MathPolygon.createPolygon could not build a ${shape} polygon.`,
+      'Check that the shape parameters (points/rect/circle) describe a valid enclosed area.',
+    );
+  }
+  return poly;
 }
 
 function readPathParent(source: unknown, path: string): unknown {
@@ -1631,6 +1759,15 @@ async function dispatch(method: string, params: Record<string, unknown> = {}): P
           'pcb.addZone',
           'pcb.deleteComponent',
           'pcb.modifyComponent',
+          'pcb.addBoardOutline',
+          'pcb.addPad',
+          'pcb.addHole',
+          'pcb.addSilkText',
+          'pcb.addSilkLine',
+          'pcb.addSolidRegion',
+          'pcb.save',
+          'pcb.importProjectFile',
+          'pcb.importSesRoute',
         ],
         devMode: false,
         globals: globals,
@@ -1666,40 +1803,317 @@ async function dispatch(method: string, params: Record<string, unknown> = {}): P
       );
     case 'export.netlist':
       return callFirst(['dmt_Project.exportNetlist', 'sch_Document.exportNetlist'], params);
-    case 'pcb.placeComponent':
-      return callFirst(
+    // ----- PCB authoring (build 0.6.0: real EasyEDA Pro class/method names) -----
+    case 'pcb.placeComponent': {
+      // PCB_PrimitiveComponent.create(componentItem, layer, x, y, rotation?).
+      // componentItem MUST be a library ITEM OBJECT ({libraryUuid,uuid} or a
+      // LIB_* search result) — NOT a bare string (mirrors the schematic fix that
+      // stopped the API hanging on extra/string args).
+      const compItem =
+        (params.component as unknown) ??
+        (params.libraryUuid && params.uuid
+          ? { libraryUuid: params.libraryUuid, uuid: params.uuid }
+          : params.footprint);
+      const pcRes = await callFirst(
         ['PCB_PrimitiveComponent.create', 'pcb_PrimitiveComponent.create'],
-        params.footprint,
+        compItem,
+        params.layer ?? PCB_LAYER.TOP,
         params.x,
         params.y,
-        params.rotation,
-        params.layer,
+        params.rotation ?? 0,
       );
-    case 'pcb.addTrack':
-      return callFirst(
-        ['PCB_PrimitiveTrack.create', 'pcb_PrimitiveTrack.create'],
-        params.points,
-        params.layer,
-        params.width,
-        params.netName,
-      );
-    case 'pcb.addVia':
-      return callFirst(
+      return pcbId(pcRes, 'pcbcomp');
+    }
+    case 'pcb.addTrack': {
+      // PCB_PrimitiveLine.create(net, layer, x1,y1,x2,y2, width) — one call per
+      // straight segment (NOT PCB_PrimitiveTrack, NOT a points[] array).
+      const tkPairs = toXYPairs(params.points);
+      const tkNet = (params.netName as string) ?? '';
+      const tkLayer = params.layer ?? PCB_LAYER.TOP;
+      const tkWidth = params.width;
+      const tkIds: string[] = [];
+      for (let i = 0; i + 1 < tkPairs.length; i++) {
+        const seg = await callFirst(
+          ['PCB_PrimitiveLine.create', 'pcb_PrimitiveLine.create'],
+          tkNet,
+          tkLayer,
+          tkPairs[i][0],
+          tkPairs[i][1],
+          tkPairs[i + 1][0],
+          tkPairs[i + 1][1],
+          tkWidth,
+        );
+        tkIds.push(pcbId(seg, 'trk').primitiveId);
+      }
+      return { primitiveId: tkIds[0] ?? `trk_${Date.now()}`, segmentIds: tkIds };
+    }
+    case 'pcb.addVia': {
+      // PCB_PrimitiveVia.create(net, x, y, holeDiameter(drill), diameter(outer), ...)
+      // net is FIRST; drill precedes the outer copper diameter.
+      const viaRes = await callFirst(
         ['PCB_PrimitiveVia.create', 'pcb_PrimitiveVia.create'],
+        (params.netName as string) ?? '',
         params.x,
         params.y,
-        params.outerDiameter,
         params.holeSize,
-        params.netName,
+        params.outerDiameter,
       );
-    case 'pcb.addZone':
+      return pcbId(viaRes, 'via');
+    }
+    case 'pcb.addZone': {
+      // PCB_PrimitivePour.create(net, layer, complexPolygon: IPCB_Polygon, ...).
+      // Filled copper (PCB_PrimitivePoured) is computed by the editor, not authored.
+      const znPoly = await buildPolygon('polygon', params);
+      const znRes = await callFirst(
+        ['PCB_PrimitivePour.create', 'pcb_PrimitivePour.create'],
+        (params.netName as string) ?? '',
+        params.layer ?? PCB_LAYER.TOP,
+        znPoly,
+      );
+      return pcbId(znRes, 'pour');
+    }
+    case 'pcb.addBoardOutline': {
+      // Board frame = geometry on layer 11 (BOARD_OUTLINE). rect/polygon draw
+      // per-segment lines; circle draws two 180° arcs (a single 360° arc with
+      // start==end is geometrically singular).
+      const boWidth = Number(params.lineWidth ?? 0.2);
+      const boShape = String(params.shape ?? 'rect');
+      const boIds: string[] = [];
+      if (boShape === 'circle') {
+        const cx = Number(params.cx);
+        const cy = Number(params.cy);
+        const r = Number(params.radius);
+        assertFinite('board outline circle', { cx, cy, radius: r });
+        // Two 180° semicircle arcs between diametrically opposite points so both
+        // endpoints are distinct and each semicircle radius is well-defined.
+        const semis: Array<[number, number, number, number]> = [
+          [cx - r, cy, cx + r, cy],
+          [cx + r, cy, cx - r, cy],
+        ];
+        for (const [sx, sy, ex, ey] of semis) {
+          const arc = await callFirst(
+            ['PCB_PrimitiveArc.create', 'pcb_PrimitiveArc.create'],
+            '',
+            PCB_LAYER.BOARD_OUTLINE,
+            sx,
+            sy,
+            ex,
+            ey,
+            180,
+            boWidth,
+          );
+          boIds.push(pcbId(arc, 'outline').primitiveId);
+        }
+      } else {
+        let pts =
+          boShape === 'polygon'
+            ? toXYPairs(params.points)
+            : (() => {
+                const x = Number(params.x);
+                const y = Number(params.y);
+                const w = Number(params.width);
+                const h = Number(params.height);
+                return [
+                  [x, y],
+                  [x + w, y],
+                  [x + w, y + h],
+                  [x, y + h],
+                ] as Array<[number, number]>;
+              })();
+        if (boShape === 'polygon' && pts.length < 3) {
+          throw newBridgeError(
+            'INVALID_GEOMETRY',
+            `board outline polygon needs at least 3 points (got ${pts.length}).`,
+            'Pass a points array describing the board frame.',
+          );
+        }
+        for (const [px, py] of pts) assertFinite(`board outline ${boShape}`, { x: px, y: py });
+        if (pts.length > 1) {
+          const first = pts[0];
+          const last = pts[pts.length - 1];
+          if (first[0] !== last[0] || first[1] !== last[1]) pts = [...pts, first];
+        }
+        for (let i = 0; i + 1 < pts.length; i++) {
+          const seg = await callFirst(
+            ['PCB_PrimitiveLine.create', 'pcb_PrimitiveLine.create'],
+            '',
+            PCB_LAYER.BOARD_OUTLINE,
+            pts[i][0],
+            pts[i][1],
+            pts[i + 1][0],
+            pts[i + 1][1],
+            boWidth,
+          );
+          boIds.push(pcbId(seg, 'outline').primitiveId);
+        }
+      }
+      return { primitiveId: boIds[0] ?? `outline_${Date.now()}`, segmentIds: boIds };
+    }
+    case 'pcb.addPad': {
+      // PCB_PrimitivePad.create(layer, padNumber, x, y, rotation, padShape, net, hole, ...)
+      // padShape default ['ELLIPSE', w, h]; hole null = SMD, ['ROUND', d] = THT.
+      const pdShape =
+        (params.padShape as unknown) ??
+        ['ELLIPSE', Number(params.width ?? 1.5), Number(params.height ?? params.width ?? 1.5)];
+      const pdHole =
+        (params.hole as unknown) ??
+        (params.holeDiameter ? ['ROUND', Number(params.holeDiameter)] : null);
+      const pdRes = await callFirst(
+        ['PCB_PrimitivePad.create', 'pcb_PrimitivePad.create'],
+        params.layer ?? (pdHole ? PCB_LAYER.MULTI : PCB_LAYER.TOP),
+        String(params.padNumber ?? '1'),
+        params.x,
+        params.y,
+        params.rotation ?? 0,
+        pdShape,
+        (params.netName as string) ?? '',
+        pdHole,
+      );
+      return pcbId(pdRes, 'pad');
+    }
+    case 'pcb.addHole': {
+      // No dedicated hole class: NPTH = pad on MULTI(12) with a hole and
+      // metallization=false; plated mounting hole = metallization=true.
+      const hlDia = Number(params.holeDiameter ?? params.diameter ?? 1);
+      const hlHole = (params.hole as unknown) ?? ['ROUND', hlDia];
+      const hlShape =
+        (params.padShape as unknown) ?? ['ELLIPSE', hlDia + 0.2, hlDia + 0.2];
+      const hlRes = await callFirst(
+        ['PCB_PrimitivePad.create', 'pcb_PrimitivePad.create'],
+        PCB_LAYER.MULTI,
+        String(params.padNumber ?? '1'),
+        params.x,
+        params.y,
+        0,
+        hlShape,
+        '',
+        hlHole,
+        0,
+        0,
+        0,
+        params.plated === true,
+      );
+      return pcbId(hlRes, 'hole');
+    }
+    case 'pcb.addSilkText': {
+      // PCB_PrimitiveString.create(layer, x, y, text, fontFamily, fontSize,
+      // lineWidth, alignMode, rotation, reverse, expansion, mirror, primitiveLock).
+      // alignMode 5 = CENTER. fontFamily must be pre-imported into EasyEDA.
+      const stRes = await callFirst(
+        ['PCB_PrimitiveString.create', 'pcb_PrimitiveString.create'],
+        params.layer ?? PCB_LAYER.TOP_SILK,
+        params.x,
+        params.y,
+        String(params.text ?? ''),
+        String(params.fontFamily ?? 'NotoSansSC-Regular'),
+        Number(params.fontSize ?? 1),
+        Number(params.lineWidth ?? 0.15),
+        Number(params.alignMode ?? 5),
+        Number(params.rotation ?? 0),
+        params.reverse === true,
+        Number(params.expansion ?? 0),
+        params.mirror === true,
+        false,
+      );
+      return pcbId(stRes, 'silktext');
+    }
+    case 'pcb.addSilkLine': {
+      // Silkscreen artwork = PCB_PrimitiveLine on layer 3|4, one call per segment.
+      const slPairs = toXYPairs(params.points);
+      const slLayer = params.layer ?? PCB_LAYER.TOP_SILK;
+      const slWidth = Number(params.lineWidth ?? params.width ?? 0.15);
+      const slIds: string[] = [];
+      for (let i = 0; i + 1 < slPairs.length; i++) {
+        const seg = await callFirst(
+          ['PCB_PrimitiveLine.create', 'pcb_PrimitiveLine.create'],
+          '',
+          slLayer,
+          slPairs[i][0],
+          slPairs[i][1],
+          slPairs[i + 1][0],
+          slPairs[i + 1][1],
+          slWidth,
+        );
+        slIds.push(pcbId(seg, 'silkline').primitiveId);
+      }
+      return { primitiveId: slIds[0] ?? `silkline_${Date.now()}`, segmentIds: slIds };
+    }
+    case 'pcb.addSolidRegion': {
+      // PCB_PrimitiveFill.create(layer, complexPolygon: IPCB_Polygon, net?, fillMode?, lineWidth?)
+      const srPoly = await buildPolygon(String(params.shape ?? 'polygon'), params);
+      const srRes = await callFirst(
+        ['PCB_PrimitiveFill.create', 'pcb_PrimitiveFill.create'],
+        params.layer ?? PCB_LAYER.TOP,
+        srPoly,
+        (params.netName as string) ?? '',
+      );
+      return pcbId(srRes, 'fill');
+    }
+    case 'pcb.save': {
+      // PCB_Document.save(uuid) — persists extension-authored primitives (a
+      // documented FAQ note: created objects are NOT preserved until save()).
+      // save() requires a real document uuid; refuse a nullish one rather than
+      // silently no-op and lose all authored geometry.
+      const saveUuid = params.documentUuid ?? params.uuid;
+      if (saveUuid === undefined || saveUuid === null || saveUuid === '') {
+        throw newBridgeError(
+          'MISSING_DOCUMENT_UUID',
+          'pcb.save requires the open PCB document/board uuid.',
+          'Pass documentUuid (the board uuid) — PCB_Document.save() will not persist authored primitives without it.',
+        );
+      }
+      return callFirst(['PCB_Document.save', 'pcb_Document.save'], saveUuid);
+    }
+    case 'pcb.importProjectFile': {
+      // Read a local file (desktop client only; needs external-interaction perm)
+      // and import it via the File>Import engine (KiCad/Altium/EAGLE/...).
+      const ipFile = await callFirst(
+        ['SYS_FileSystem.readFileFromFileSystem', 'sys_FileSystem.readFileFromFileSystem'],
+        params.filePath,
+      );
+      if (!ipFile) {
+        throw newBridgeError(
+          'FILE_NOT_READ',
+          `Could not read file: ${String(params.filePath)}`,
+          'Path must be absolute + exist; readFileFromFileSystem is desktop-client only and needs the extension external-interaction permission.',
+        );
+      }
+      const ipProps =
+        (params.props as unknown) ?? {
+          importOption: 'ImportDocumentExtractLibraries',
+          associateFootprint: true,
+          associate3DModel: true,
+        };
+      const ipSaveTo = params.existingProjectUuid
+        ? { operation: 'Existing Project', existingProjectUuid: params.existingProjectUuid }
+        : ((params.saveTo as unknown) ?? undefined);
       return callFirst(
-        ['PCB_PrimitivePour.create', 'PCB_ComplexPolygon.create', 'pcb_PrimitivePour.create'],
-        params.points,
-        params.layer,
-        params.netName,
-        params.clearance,
+        ['SYS_FileManager.importProjectByProjectFile', 'sys_FileManager.importProjectByProjectFile'],
+        ipFile,
+        params.fileType ?? 'KiCad',
+        ipProps,
+        ipSaveTo,
       );
+    }
+    case 'pcb.importSesRoute': {
+      // PCB_Document.importAutoRouteSesFile(File) — applies Freerouting SES routing
+      // onto the OPEN board (which must already have components + nets + outline).
+      const seFile = await callFirst(
+        ['SYS_FileSystem.readFileFromFileSystem', 'sys_FileSystem.readFileFromFileSystem'],
+        params.filePath,
+      );
+      if (!seFile) {
+        throw newBridgeError(
+          'FILE_NOT_READ',
+          `Could not read SES file: ${String(params.filePath)}`,
+          'Path must be absolute + exist; desktop-client only.',
+        );
+      }
+      return callFirst(
+        ['PCB_Document.importAutoRouteSesFile', 'pcb_Document.importAutoRouteSesFile'],
+        seFile,
+      );
+    }
     case 'pcb.deleteComponent':
       return callFirst(
         ['PCB_PrimitiveComponent.delete', 'pcb_PrimitiveComponent.delete'],
@@ -1861,7 +2275,7 @@ function buildHandshake(): Record<string, unknown> {
     protocolVersion: BRIDGE_VERSION,
     contractVersion: BRIDGE_CONTRACT_VERSION,
     clientName: 'easyeda-mcp-pro',
-    extensionVersion: '0.5.7',
+    extensionVersion: '0.6.0',
     easyedaVersion: getEasyedaVersion(),
     devMode: false,
   };
@@ -2319,7 +2733,7 @@ async function toggleAutoConnect(): Promise<void> {
 }
 
 async function handleActivate(): Promise<void> {
-  logPanel('extension active — build 0.5.9 (net connectivity fix + createNetFlag/createNetPort + system.inspectWires for wire_probe)');
+  logPanel('extension active — build 0.6.0 (PCB authoring: board outline + track/via/zone/pad/hole/silk/pour fixes with real EasyEDA class names + tscircuit KiCad import via SYS_FileManager)');
   autoConnectEnabled = loadAutoConnectSetting();
   if (autoConnectEnabled) {
     showToast(`MCP Bridge: Auto-Connect ON — scanning 127.0.0.1:${PORT_SCAN_LABEL}`);

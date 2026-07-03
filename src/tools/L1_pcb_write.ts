@@ -1,7 +1,58 @@
+import { execFile } from 'node:child_process';
+import os from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
 import { z } from 'zod';
 import { type ToolDefinition, type ToolContext } from './types.js';
 import { type EnvConfig } from '../config/env.js';
 import { planComponentGroupPlacement, planRoutePath } from '../pcb-layout/index.js';
+
+const execFileAsync = promisify(execFile);
+
+// Shared output shape for the primitive-authoring PCB write tools.
+const pcbWriteOutputSchema = z.object({
+  success: z.boolean(),
+  primitiveId: z.string().optional(),
+  segmentIds: z.array(z.string()).optional(),
+  result: z.unknown().optional(),
+  error: z.string().optional(),
+});
+
+// Call a bridge write method and normalize the result to pcbWriteOutputSchema.
+// Never throws — bridge/API failures come back as { success: false, error }.
+async function bridgeWrite(
+  ctx: ToolContext,
+  method: string,
+  params: Record<string, unknown>,
+): Promise<{
+  success: boolean;
+  primitiveId?: string;
+  segmentIds?: string[];
+  result?: unknown;
+  error?: string;
+}> {
+  try {
+    const result = await ctx.bridge.call<Record<string, unknown>, unknown>(method, params);
+    if (typeof result === 'string') return { success: true, primitiveId: result, result };
+    if (result && typeof result === 'object') {
+      const r = result as Record<string, unknown>;
+      return {
+        success: true,
+        primitiveId: (r.primitiveId as string | undefined) ?? (r.result as string | undefined),
+        segmentIds: r.segmentIds as string[] | undefined,
+        result,
+      };
+    }
+    return { success: true, result };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// Flatten [{x,y},...] to [x,y,x,y,...]; the extension's toXYPairs accepts either.
+function flattenPoints(points: Array<{ x: number; y: number }> | undefined): number[] | undefined {
+  return points ? points.flatMap((pt) => [pt.x, pt.y]) : undefined;
+}
 
 const layoutPointSchema = z.object({ x: z.number(), y: z.number() });
 const layoutBoardSchema = z.object({
@@ -302,61 +353,48 @@ function registerPcbWriteTools(
   registry.register({
     name: 'easyeda_pcb_place_component',
     title: 'Place component on PCB',
-    description: 'Place a component footprint on the active PCB layout.',
+    description:
+      'Place a component footprint on the active PCB layout. The real EasyEDA API (PCB_PrimitiveComponent.create) requires a library ITEM OBJECT, so pass libraryUuid + uuid (device or footprint) — a bare footprint string is a legacy fallback that generally will not resolve. layer: 1=TOP, 2=BOTTOM.',
     profile: 'full',
     evidence: ['official-docs'],
     risk: 'high',
     confirmWrite: true,
     group: 'pcb-write',
-    version: '1.0.0',
+    version: '1.1.0',
     annotations: {
       readOnlyHint: false,
       destructiveHint: false,
     },
     inputSchema: z.object({
-      footprint: z.string(),
+      libraryUuid: z.string().optional(),
+      uuid: z.string().optional(),
+      footprint: z.string().optional(),
       x: z.number(),
       y: z.number(),
       rotation: z.number().default(0),
       layer: z.number().default(1),
       confirmWrite: z.literal(true),
     }),
-    outputSchema: z.object({
-      success: z.boolean(),
-      primitiveId: z.string().optional(),
-      error: z.string().optional(),
-    }),
+    outputSchema: pcbWriteOutputSchema,
     handler: async (ctx: ToolContext, params: unknown) => {
       const p = params as {
-        footprint: string;
+        libraryUuid?: string;
+        uuid?: string;
+        footprint?: string;
         x: number;
         y: number;
         rotation: number;
         layer: number;
       };
-      try {
-        const result = await ctx.bridge.call<
-          Record<string, unknown>,
-          { primitiveId?: string; result?: string }
-        >('pcb.placeComponent', {
-          footprint: p.footprint,
-          x: p.x,
-          y: p.y,
-          rotation: p.rotation,
-          layer: p.layer,
-        });
-        const data = result as { primitiveId?: string; result?: string } | string;
-        return {
-          success: true,
-          primitiveId:
-            typeof data === 'string' ? data : (data?.primitiveId ?? data?.result ?? undefined),
-        };
-      } catch (err) {
-        return {
-          success: false,
-          error: err instanceof Error ? err.message : String(err),
-        };
-      }
+      return bridgeWrite(ctx, 'pcb.placeComponent', {
+        libraryUuid: p.libraryUuid,
+        uuid: p.uuid,
+        footprint: p.footprint,
+        x: p.x,
+        y: p.y,
+        rotation: p.rotation,
+        layer: p.layer,
+      });
     },
   });
 
@@ -626,6 +664,474 @@ function registerPcbWriteTools(
           error: err instanceof Error ? err.message : String(err),
         };
       }
+    },
+  });
+
+  // -------------------------------------------------------------------------
+  // v0.6.0 PCB authoring + import tools (real EasyEDA Pro class/method names,
+  // confirmed against @jlceda/pro-api-types).
+  // -------------------------------------------------------------------------
+
+  registry.register({
+    name: 'easyeda_pcb_add_board_outline',
+    title: 'Add PCB board outline',
+    description:
+      'Author the board frame on the Board Outline layer (EPCB_LayerId 11). shape="rect" (x,y,width,height), "circle" (cx,cy,radius), or "polygon" (points). Draws closed line/arc geometry that EasyEDA treats as the board shape.',
+    profile: 'full',
+    evidence: ['official-docs'],
+    risk: 'high',
+    confirmWrite: true,
+    group: 'pcb-write',
+    version: '1.0.0',
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    inputSchema: z
+      .object({
+        shape: z.enum(['rect', 'circle', 'polygon']).default('rect'),
+        x: z.number().optional(),
+        y: z.number().optional(),
+        width: z.number().optional(),
+        height: z.number().optional(),
+        cx: z.number().optional(),
+        cy: z.number().optional(),
+        radius: z.number().optional(),
+        points: z.array(z.object({ x: z.number(), y: z.number() })).optional(),
+        lineWidth: z.number().default(0.2),
+        confirmWrite: z.literal(true),
+      })
+      .superRefine((val, ctx) => {
+        const require = (keys: string[]) => {
+          for (const k of keys) {
+            if ((val as Record<string, unknown>)[k] === undefined) {
+              ctx.addIssue({
+                code: 'custom',
+                message: `shape "${val.shape}" requires "${k}"`,
+                path: [k],
+              });
+            }
+          }
+        };
+        if (val.shape === 'circle') require(['cx', 'cy', 'radius']);
+        else if (val.shape === 'polygon') {
+          if (!val.points || val.points.length < 3) {
+            ctx.addIssue({
+              code: 'custom',
+              message: 'shape "polygon" requires a points array with at least 3 points',
+              path: ['points'],
+            });
+          }
+        } else require(['x', 'y', 'width', 'height']);
+      }),
+    outputSchema: pcbWriteOutputSchema,
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const p = params as {
+        shape?: string;
+        x?: number;
+        y?: number;
+        width?: number;
+        height?: number;
+        cx?: number;
+        cy?: number;
+        radius?: number;
+        points?: Array<{ x: number; y: number }>;
+        lineWidth?: number;
+      };
+      const bp: Record<string, unknown> = {
+        shape: p.shape ?? 'rect',
+        lineWidth: p.lineWidth ?? 0.2,
+      };
+      const pts = flattenPoints(p.points);
+      if (pts) bp.points = pts;
+      for (const k of ['x', 'y', 'width', 'height', 'cx', 'cy', 'radius'] as const) {
+        if (p[k] !== undefined) bp[k] = p[k];
+      }
+      return bridgeWrite(ctx, 'pcb.addBoardOutline', bp);
+    },
+  });
+
+  registry.register({
+    name: 'easyeda_pcb_document_save',
+    title: 'Save PCB document',
+    description:
+      'Persist extension-authored PCB primitives via PCB_Document.save(uuid). EasyEDA does not preserve API-created objects until the document is saved, and save() will not persist without a real document uuid — so documentUuid (the open PCB/board uuid) is REQUIRED.',
+    profile: 'full',
+    evidence: ['official-docs'],
+    risk: 'medium',
+    confirmWrite: true,
+    group: 'pcb-write',
+    version: '1.1.0',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: z.object({
+      documentUuid: z.string().min(1),
+      confirmWrite: z.literal(true),
+    }),
+    outputSchema: pcbWriteOutputSchema,
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const p = params as { documentUuid: string };
+      return bridgeWrite(ctx, 'pcb.save', { documentUuid: p.documentUuid });
+    },
+  });
+
+  registry.register({
+    name: 'easyeda_pcb_add_pad',
+    title: 'Add PCB pad',
+    description:
+      'Add an SMD or through-hole pad (PCB_PrimitivePad.create). SMD: layer 1|2, omit holeDiameter. THT: provide holeDiameter (auto-placed on MULTI layer 12). padShape defaults to a round ELLIPSE sized by width/height; pass an explicit padShape/hole array to override.',
+    profile: 'full',
+    evidence: ['official-docs'],
+    risk: 'high',
+    confirmWrite: true,
+    group: 'pcb-write',
+    version: '1.0.0',
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    inputSchema: z.object({
+      x: z.number(),
+      y: z.number(),
+      layer: z.number().optional(),
+      padNumber: z.string().default('1'),
+      width: z.number().default(1.5),
+      height: z.number().optional(),
+      rotation: z.number().default(0),
+      netName: z.string().optional(),
+      holeDiameter: z.number().optional(),
+      padShape: z.array(z.any()).optional(),
+      hole: z.array(z.any()).optional(),
+      confirmWrite: z.literal(true),
+    }),
+    outputSchema: pcbWriteOutputSchema,
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const p = params as Record<string, unknown>;
+      return bridgeWrite(ctx, 'pcb.addPad', {
+        x: p.x,
+        y: p.y,
+        layer: p.layer,
+        padNumber: p.padNumber,
+        width: p.width,
+        height: p.height,
+        rotation: p.rotation,
+        netName: p.netName,
+        holeDiameter: p.holeDiameter,
+        padShape: p.padShape,
+        hole: p.hole,
+      });
+    },
+  });
+
+  registry.register({
+    name: 'easyeda_pcb_add_hole',
+    title: 'Add PCB hole (NPTH / plated mounting hole)',
+    description:
+      'Add a non-plated (NPTH) tooling/mounting hole or a plated mounting hole. Implemented as a pad on the MULTI layer with a hole; plated=false yields NPTH, plated=true a plated hole.',
+    profile: 'full',
+    evidence: ['inferred'],
+    risk: 'high',
+    confirmWrite: true,
+    group: 'pcb-write',
+    version: '1.0.0',
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    inputSchema: z.object({
+      x: z.number(),
+      y: z.number(),
+      holeDiameter: z.number(),
+      diameter: z.number().optional(),
+      padNumber: z.string().default('1'),
+      plated: z.boolean().default(false),
+      confirmWrite: z.literal(true),
+    }),
+    outputSchema: pcbWriteOutputSchema,
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const p = params as Record<string, unknown>;
+      return bridgeWrite(ctx, 'pcb.addHole', {
+        x: p.x,
+        y: p.y,
+        holeDiameter: p.holeDiameter,
+        diameter: p.diameter,
+        padNumber: p.padNumber,
+        plated: p.plated,
+      });
+    },
+  });
+
+  registry.register({
+    name: 'easyeda_pcb_add_silkscreen_text',
+    title: 'Add silkscreen text',
+    description:
+      'Place silkscreen (or document-layer) text via PCB_PrimitiveString.create. layer 3=top silk, 4=bottom silk, 13=document. alignMode 1..9 (5=center). fontFamily must already be imported into EasyEDA.',
+    profile: 'full',
+    evidence: ['official-docs'],
+    risk: 'high',
+    confirmWrite: true,
+    group: 'pcb-write',
+    version: '1.0.0',
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    inputSchema: z.object({
+      x: z.number(),
+      y: z.number(),
+      text: z.string(),
+      layer: z.number().default(3),
+      fontFamily: z.string().optional(),
+      fontSize: z.number().default(1),
+      lineWidth: z.number().default(0.15),
+      alignMode: z.number().default(5),
+      rotation: z.number().default(0),
+      reverse: z.boolean().default(false),
+      expansion: z.number().default(0),
+      mirror: z.boolean().default(false),
+      confirmWrite: z.literal(true),
+    }),
+    outputSchema: pcbWriteOutputSchema,
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const p = params as Record<string, unknown>;
+      return bridgeWrite(ctx, 'pcb.addSilkText', {
+        x: p.x,
+        y: p.y,
+        text: p.text,
+        layer: p.layer,
+        fontFamily: p.fontFamily,
+        fontSize: p.fontSize,
+        lineWidth: p.lineWidth,
+        alignMode: p.alignMode,
+        rotation: p.rotation,
+        reverse: p.reverse,
+        expansion: p.expansion,
+        mirror: p.mirror,
+      });
+    },
+  });
+
+  registry.register({
+    name: 'easyeda_pcb_add_silkscreen_line',
+    title: 'Add silkscreen line/path',
+    description:
+      'Draw silkscreen artwork (logos, outlines, glyphs) as connected line segments via PCB_PrimitiveLine on layer 3 (top) or 4 (bottom). Provide a points polyline.',
+    profile: 'full',
+    evidence: ['official-docs'],
+    risk: 'high',
+    confirmWrite: true,
+    group: 'pcb-write',
+    version: '1.0.0',
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    inputSchema: z.object({
+      points: z.array(z.object({ x: z.number(), y: z.number() })).min(2),
+      layer: z.number().default(3),
+      lineWidth: z.number().default(0.15),
+      confirmWrite: z.literal(true),
+    }),
+    outputSchema: pcbWriteOutputSchema,
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const p = params as {
+        points: Array<{ x: number; y: number }>;
+        layer?: number;
+        lineWidth?: number;
+      };
+      return bridgeWrite(ctx, 'pcb.addSilkLine', {
+        points: flattenPoints(p.points),
+        layer: p.layer ?? 3,
+        lineWidth: p.lineWidth ?? 0.15,
+      });
+    },
+  });
+
+  registry.register({
+    name: 'easyeda_pcb_add_solid_region',
+    title: 'Add PCB solid fill region',
+    description:
+      'Author a solid copper (or other-layer) fill region via PCB_PrimitiveFill.create. shape="polygon" (points), "rect" (x,y,width,height), or "circle" (cx,cy,radius). Tie to a net with netName.',
+    profile: 'full',
+    evidence: ['official-docs'],
+    risk: 'high',
+    confirmWrite: true,
+    group: 'pcb-write',
+    version: '1.0.0',
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    inputSchema: z.object({
+      layer: z.number().default(1),
+      shape: z.enum(['polygon', 'rect', 'circle']).default('polygon'),
+      points: z.array(z.object({ x: z.number(), y: z.number() })).optional(),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      width: z.number().optional(),
+      height: z.number().optional(),
+      cx: z.number().optional(),
+      cy: z.number().optional(),
+      radius: z.number().optional(),
+      netName: z.string().optional(),
+      confirmWrite: z.literal(true),
+    }),
+    outputSchema: pcbWriteOutputSchema,
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const p = params as {
+        layer?: number;
+        shape?: string;
+        points?: Array<{ x: number; y: number }>;
+        x?: number;
+        y?: number;
+        width?: number;
+        height?: number;
+        cx?: number;
+        cy?: number;
+        radius?: number;
+        netName?: string;
+      };
+      const bp: Record<string, unknown> = {
+        layer: p.layer ?? 1,
+        shape: p.shape ?? 'polygon',
+        netName: p.netName,
+      };
+      const pts = flattenPoints(p.points);
+      if (pts) bp.points = pts;
+      for (const k of ['x', 'y', 'width', 'height', 'cx', 'cy', 'radius'] as const) {
+        if (p[k] !== undefined) bp[k] = p[k];
+      }
+      return bridgeWrite(ctx, 'pcb.addSolidRegion', bp);
+    },
+  });
+
+  registry.register({
+    name: 'easyeda_pcb_import_project_file',
+    title: 'Import external board file into EasyEDA project',
+    description:
+      'Headlessly import a KiCad/Altium/EAGLE/OrCAD/PADS/LTspice project file into the current or an existing EasyEDA Pro project via SYS_FileManager.importProjectByProjectFile. Desktop client only; needs the extension external-interaction permission. filePath must be an absolute local path (a KiCad archive .zip is preferred for fileType "KiCad").',
+    profile: 'full',
+    evidence: ['official-docs'],
+    risk: 'high',
+    confirmWrite: true,
+    group: 'pcb-write',
+    version: '1.0.0',
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    inputSchema: z.object({
+      filePath: z.string(),
+      fileType: z.string().default('KiCad'),
+      existingProjectUuid: z.string().optional(),
+      importOption: z.string().optional(),
+      associateFootprint: z.boolean().optional(),
+      associate3DModel: z.boolean().optional(),
+      confirmWrite: z.literal(true),
+    }),
+    outputSchema: z.object({
+      success: z.boolean(),
+      result: z.unknown().optional(),
+      error: z.string().optional(),
+    }),
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const p = params as {
+        filePath: string;
+        fileType?: string;
+        existingProjectUuid?: string;
+        importOption?: string;
+        associateFootprint?: boolean;
+        associate3DModel?: boolean;
+      };
+      const props: Record<string, unknown> = {};
+      if (p.importOption !== undefined) props.importOption = p.importOption;
+      if (p.associateFootprint !== undefined) props.associateFootprint = p.associateFootprint;
+      if (p.associate3DModel !== undefined) props.associate3DModel = p.associate3DModel;
+      const bp: Record<string, unknown> = {
+        filePath: p.filePath,
+        fileType: p.fileType ?? 'KiCad',
+        existingProjectUuid: p.existingProjectUuid,
+      };
+      if (Object.keys(props).length > 0) bp.props = props;
+      const res = await bridgeWrite(ctx, 'pcb.importProjectFile', bp);
+      return { success: res.success, result: res.result, error: res.error };
+    },
+  });
+
+  registry.register({
+    name: 'easyeda_pcb_import_ses_route',
+    title: 'Import Freerouting SES route',
+    description:
+      'Apply a Specctra SES (autorouter session) file onto the OPEN PCB via PCB_Document.importAutoRouteSesFile — the Freerouting round-trip. The board must already have components, nets, and outline. filePath must be absolute.',
+    profile: 'full',
+    evidence: ['official-docs'],
+    risk: 'high',
+    confirmWrite: true,
+    group: 'pcb-write',
+    version: '1.0.0',
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    inputSchema: z.object({
+      filePath: z.string(),
+      confirmWrite: z.literal(true),
+    }),
+    outputSchema: z.object({
+      success: z.boolean(),
+      result: z.unknown().optional(),
+      error: z.string().optional(),
+    }),
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const p = params as { filePath: string };
+      const res = await bridgeWrite(ctx, 'pcb.importSesRoute', { filePath: p.filePath });
+      return { success: res.success, result: res.result, error: res.error };
+    },
+  });
+
+  registry.register({
+    name: 'easyeda_pcb_import_tscircuit_board',
+    title: 'Build a tscircuit board and import it into EasyEDA',
+    description:
+      'The whole-board fallback: exports a tscircuit board to a patched KiCad archive (runs scripts/patch-kicad-cutouts.js = tsci export -f kicad_zip + cutout/soldermask patch), then imports it into the EasyEDA project via the bridge. Runs on the desktop client with the external-interaction permission. Set skipBuild=true to import a pre-built zip.',
+    profile: 'full',
+    evidence: ['inferred'],
+    risk: 'high',
+    confirmWrite: true,
+    group: 'pcb-write',
+    version: '1.0.0',
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    inputSchema: z.object({
+      board: z.enum(['top', 'middle', 'bottom']),
+      tscircuitDir: z.string().default('TSCIRCUIT_PROJECT_DIR'),
+      existingProjectUuid: z.string().optional(),
+      zipPath: z.string().optional(),
+      skipBuild: z.boolean().default(false),
+      confirmWrite: z.literal(true),
+    }),
+    outputSchema: z.object({
+      success: z.boolean(),
+      zipPath: z.string().optional(),
+      buildLog: z.string().optional(),
+      result: z.unknown().optional(),
+      error: z.string().optional(),
+    }),
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const p = params as {
+        board: 'top' | 'middle' | 'bottom';
+        tscircuitDir: string;
+        existingProjectUuid?: string;
+        zipPath?: string;
+        skipBuild?: boolean;
+      };
+      const zipPath =
+        p.zipPath ?? path.join(os.homedir(), 'Downloads', 'Maker Chip', `${p.board}.kicad.zip`);
+      let buildLog: string | undefined;
+      if (!p.skipBuild) {
+        try {
+          const { stdout, stderr } = await execFileAsync(
+            'node',
+            ['scripts/patch-kicad-cutouts.js', p.board],
+            { cwd: p.tscircuitDir, timeout: 300_000, maxBuffer: 32 * 1024 * 1024 },
+          );
+          buildLog = `${stdout}\n${stderr}`.trim();
+        } catch (err) {
+          const e = err as { stdout?: string; stderr?: string; message?: string };
+          return {
+            success: false,
+            zipPath,
+            buildLog: `${e.stdout ?? ''}\n${e.stderr ?? ''}`.trim() || undefined,
+            error: `tscircuit build failed: ${e.message ?? String(err)}`,
+          };
+        }
+      }
+      const res = await bridgeWrite(ctx, 'pcb.importProjectFile', {
+        filePath: zipPath,
+        fileType: 'KiCad',
+        existingProjectUuid: p.existingProjectUuid,
+      });
+      return {
+        success: res.success,
+        zipPath,
+        buildLog,
+        result: res.result,
+        error: res.error,
+      };
     },
   });
 }

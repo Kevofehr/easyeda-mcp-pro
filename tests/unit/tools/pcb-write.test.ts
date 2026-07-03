@@ -67,6 +67,7 @@ describe('PCB Write Tools', () => {
     expect(result).toEqual({
       success: true,
       primitiveId: 'comp-1234',
+      result: 'comp-1234',
     });
   });
 
