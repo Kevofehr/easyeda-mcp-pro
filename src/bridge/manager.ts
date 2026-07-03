@@ -351,6 +351,7 @@ export class BridgeManager extends EventEmitter {
       capabilities: EasyedaApiMethodSchema.options,
       methodRegistryHash: this._methodRegistryHash,
       devMode: parsed.data.devMode ?? false,
+      heartbeatIntervalMs: this.config.BRIDGE_HEARTBEAT_MS,
     };
 
     // Reply with hello

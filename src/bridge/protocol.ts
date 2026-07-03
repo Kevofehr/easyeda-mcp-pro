@@ -4,9 +4,15 @@ export const BRIDGE_PROTOCOL = 'easyeda-mcp-pro.bridge';
 export const BRIDGE_CLIENT_NAME = 'easyeda-mcp-pro';
 export const BRIDGE_CONTRACT_VERSION = 1;
 
-/** Supported protocol versions for the bridge pairing/handshake. */
-export const SUPPORTED_PROTOCOL_VERSIONS = ['1.0.0'] as const;
-export const CURRENT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
+/**
+ * Supported protocol versions for the bridge pairing/handshake. Keep this a
+ * SUPERSET of every extension protocolVersion ever shipped — the server rejects
+ * a handshake whose protocolVersion is not listed here (4001), so dropping an
+ * older/newer value silently breaks that extension's ability to connect.
+ * 1.1.0 adds the optional negotiated `heartbeatIntervalMs` field to `hello`.
+ */
+export const SUPPORTED_PROTOCOL_VERSIONS = ['1.0.0', '1.1.0'] as const;
+export const CURRENT_PROTOCOL_VERSION = '1.1.0';
 
 /**
  * Zod schema for the initial handshake message.
@@ -58,6 +64,10 @@ export const BridgeHelloSchema = z.object({
   capabilities: z.array(z.string()),
   methodRegistryHash: z.string(),
   devMode: z.boolean(),
+  // Server's heartbeat cadence (ms). The client adapts its own beat + liveness
+  // window to this so a non-default BRIDGE_HEARTBEAT_MS never false-drops a
+  // healthy link. Optional for backward-compat with pre-1.1.0 servers.
+  heartbeatIntervalMs: z.number().int().positive().optional(),
 });
 
 /**

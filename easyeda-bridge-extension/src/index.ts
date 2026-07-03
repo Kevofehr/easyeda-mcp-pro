@@ -112,7 +112,14 @@ const EASYEDA_REGISTER_OPEN_FALLBACK_MS = 600;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 const STORAGE_KEY = 'easyeda-mcp-pro:autoConnect';
-const HEARTBEAT_MS = 15000;
+// Beat every 10s to match the server; each side treats the other as dead after
+// ~3 missed beats, so symmetric intervals give both a 3x safety margin.
+const HEARTBEAT_MS = 10000;
+// Receive-side liveness: reconnect if the server sends nothing at all (not even a
+// heartbeat) for this long. ~35s tolerates ~3 missed server beats plus the timer
+// throttling browsers apply to background tabs before we treat the link as dead.
+const LIVENESS_TIMEOUT_MS = 35000;
+const WATCHDOG_CHECK_MS = 5000;
 const SOCKET_ID = 'easyeda-mcp-pro-bridge';
 const PORT_SCAN_LABEL = `${BRIDGE_PORT}-${BRIDGE_PORT + PORT_SCAN_COUNT - 1}`;
 // Allow-list of EasyEDA Pro API class prefixes reachable via api.call.
@@ -137,6 +144,13 @@ let connectRunId = 0;
 let manualDisconnectRequested = false;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+let lastInboundMs = 0;
+// Effective heartbeat cadence + liveness window. Default to the constants above,
+// but adapt to the server's advertised heartbeatIntervalMs on `hello` so a
+// non-default server cadence neither zombie-drops us nor false-flaps the link.
+let effectiveHeartbeatMs = HEARTBEAT_MS;
+let livenessTimeoutMs = LIVENESS_TIMEOUT_MS;
 let externalInteractionWarningShown = false;
 
 function getGlobal(): EasyedaGlobal | null {
@@ -2284,7 +2298,7 @@ function buildHandshake(): Record<string, unknown> {
     protocolVersion: BRIDGE_VERSION,
     contractVersion: BRIDGE_CONTRACT_VERSION,
     clientName: 'easyeda-mcp-pro',
-    extensionVersion: '0.7.0', // x-release-please-version
+    extensionVersion: '0.7.1', // x-release-please-version
     easyedaVersion: getEasyedaVersion(),
     devMode: false,
   };
@@ -2362,17 +2376,39 @@ function getEasyedaVersion(): string | undefined {
 
 function startHeartbeat(): void {
   stopHeartbeat();
+  lastInboundMs = Date.now(); // seed: we just received the server's hello
   heartbeatTimer = setInterval(() => {
     if (connectedPort !== null) {
       send({ type: 'heartbeat', timestamp: Date.now() });
     }
-  }, HEARTBEAT_MS);
+  }, effectiveHeartbeatMs);
+  // Receive-side liveness watchdog. The register() socket path gives us no
+  // onclose callback, and background tabs throttle the heartbeat timer, so a
+  // dead/silent server (restart, dropped socket, missed beats) can otherwise
+  // leave us a "connected" zombie that never self-heals. If the server has sent
+  // nothing for LIVENESS_TIMEOUT_MS, tear the socket down — closeSocket() then
+  // schedules a fresh reconnect (port rescan + handshake).
+  watchdogTimer = setInterval(() => {
+    if (connectionState !== 'connected') return;
+    const silentMs = Date.now() - lastInboundMs;
+    if (silentMs > livenessTimeoutMs) {
+      diagToast(`server silent ${Math.round(silentMs / 1000)}s — reconnecting`);
+      if (!manualDisconnectRequested) {
+        showToast('MCP Bridge: server went silent — reconnecting…');
+      }
+      closeSocket(); // → scheduleReconnect()
+    }
+  }, WATCHDOG_CHECK_MS);
 }
 
 function stopHeartbeat(): void {
   if (heartbeatTimer) {
     clearInterval(heartbeatTimer);
     heartbeatTimer = null;
+  }
+  if (watchdogTimer) {
+    clearInterval(watchdogTimer);
+    watchdogTimer = null;
   }
 }
 
@@ -2412,7 +2448,16 @@ async function handleRequest(message: BridgeRequest): Promise<void> {
 }
 
 function handleMessage(raw: string): InboundMessageType {
-  const message = JSON.parse(raw) as { type?: string };
+  // Any bytes from the server prove the link is alive — reset the liveness clock
+  // first, even for a payload we can't parse (still evidence the server is there).
+  lastInboundMs = Date.now();
+  let message: { type?: string };
+  try {
+    message = JSON.parse(raw) as { type?: string };
+  } catch (error) {
+    log('bridge received non-JSON message; ignoring', { error: String(error) });
+    return 'ignored';
+  }
 
   if (message.type === 'hello') {
     const record = message as Record<string, unknown>;
@@ -2430,6 +2475,18 @@ function handleMessage(raw: string): InboundMessageType {
         protocolVersion: BRIDGE_VERSION,
         supportedProtocolVersions: supportedVersions,
       });
+    }
+    // Adapt our beat + liveness window to the server's advertised cadence (1.1.0+)
+    // so a non-default BRIDGE_HEARTBEAT_MS neither zombie-drops us (beat too slow)
+    // nor false-flaps the watchdog (window too tight). Falls back to defaults for
+    // pre-1.1.0 servers that don't advertise. Runs before startHeartbeat().
+    const serverBeat = Number(record.heartbeatIntervalMs);
+    if (Number.isFinite(serverBeat) && serverBeat >= 1000 && serverBeat <= 60000) {
+      effectiveHeartbeatMs = Math.min(HEARTBEAT_MS, serverBeat);
+      livenessTimeoutMs = Math.max(LIVENESS_TIMEOUT_MS, Math.ceil(3.5 * serverBeat));
+    } else {
+      effectiveHeartbeatMs = HEARTBEAT_MS;
+      livenessTimeoutMs = LIVENESS_TIMEOUT_MS;
     }
     log('Bridge handshake accepted');
     diagToast('HELLO received — connected!');
@@ -2584,7 +2641,15 @@ async function connect(mode: ConnectMode = 'manual'): Promise<void> {
     } catch (error) {
       log('connect() threw unexpectedly', error);
     } finally {
-      if (runId === connectRunId && connectionState === 'connecting') {
+      // Reschedule whenever this scan ended without a live connection — not only
+      // from the 'connecting' state. A fallback (browser/create) socket that
+      // opens then closes mid-scan flips the shared state to 'disconnected', so a
+      // 'connecting'-only guard would leave the bridge idle with no pending retry.
+      // Cast defeats TS's stale flow-narrowing: connectionState is assigned
+      // 'connecting' at the top of connect(), but the async connectToPort
+      // callbacks can move it to 'connected'/'disconnected' before we get here.
+      const scanFailed = (connectionState as ConnectionState) !== 'connected';
+      if (runId === connectRunId && scanFailed && !manualDisconnectRequested) {
         connectionState = 'disconnected';
         socketHandle = null;
         connectedPort = null;

@@ -68,17 +68,38 @@ async function main() {
 
   process.stderr.write(`easyeda-mcp-pro ready on ${config.TRANSPORT} transport\n`);
 
+  let exiting = false;
   const shutdown = async () => {
     await instance.httpTransport?.close();
     await instance.shutdown();
   };
+  const exitCleanly = (why: string, code = 0) => {
+    if (exiting) return;
+    exiting = true;
+    process.stderr.write(`easyeda-mcp-pro: ${why}; shutting down\n`);
+    void shutdown().finally(() => process.exit(code));
+  };
 
-  process.once('SIGINT', () => {
-    void shutdown().finally(() => process.exit(0));
-  });
-  process.once('SIGTERM', () => {
-    void shutdown().finally(() => process.exit(0));
-  });
+  process.once('SIGINT', () => exitCleanly('SIGINT'));
+  process.once('SIGTERM', () => exitCleanly('SIGTERM'));
+
+  // stdio: exit when the parent (the MCP client) disconnects. Signals are not
+  // reliably delivered to stdio children — especially on Windows — so a closed
+  // stdin is the authoritative "parent is gone" trigger. Exiting here stops the
+  // server from lingering as a zombie that squats the bridge port and gets
+  // hijacked by the next session's extension scan.
+  if (config.TRANSPORT !== 'http') {
+    process.stdin.once('end', () => exitCleanly('stdin ended (parent disconnected)'));
+    process.stdin.once('close', () => exitCleanly('stdin closed (parent disconnected)'));
+    const transport = instance.transport as { onclose?: () => void } | undefined;
+    if (transport) {
+      const previousOnClose = transport.onclose;
+      transport.onclose = () => {
+        previousOnClose?.();
+        exitCleanly('stdio transport closed (parent disconnected)');
+      };
+    }
+  }
 
   process.on('unhandledRejection', (reason) => {
     process.stderr.write(`Unhandled rejection: ${reason}\n`);
