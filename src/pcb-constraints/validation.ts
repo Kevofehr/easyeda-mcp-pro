@@ -1,7 +1,7 @@
 /**
  * PCB constraint validation rules.
  *
- * Implements constraint checks that operate on {@link PcbConstraintInput}
+ * Implements production constraint checks that operate on {@link PcbConstraintInput}
  * and produce structured {@link PcbConstraintIssue}s.
  *
  * Rules:
@@ -17,12 +17,35 @@
  * 10. Missing manufacturing constraints (warning)
  * 11. Fiducials recommended for SMT (warning)
  * 12. High-voltage creepage/clearance (error)
+ * 13. Missing drill file (error)
+ * 14. Copper-to-edge clearance violations (error)
+ * 15. Drill/annular-ring manufacturing risk (warning)
+ * 16. Soldermask sliver risk (warning)
+ * 17. Silkscreen over exposed pads (warning)
+ * 18. Tooling holes for assembly/panel fixtures (warning)
+ * 19. Polarity/orientation marks (warning)
+ * 20. Component spacing/courtyard violations (warning)
+ * 21. Critical-net testpoint coverage (warning)
+ * 22. Programming/debug header access (error)
+ * 23. Fabrication notes completeness (warning)
  *
  * @module
  */
 
 import type { PcbConstraintInput, PcbConstraintIssue, PcbConstraintResult } from './types.js';
 import { pcbError, pcbWarning } from './errors.js';
+
+const MIN_COPPER_TO_EDGE_MM = 0.25;
+const MIN_DRILL_MM = 0.2;
+const MIN_ANNULAR_RING_MM = 0.1;
+const MIN_SOLDERMASK_SLIVER_MM = 0.1;
+const MIN_SMT_FIDUCIAL_COUNT = 3;
+const MIN_TOOLING_HOLE_COUNT = 2;
+const MIN_TESTPOINT_COVERAGE_RATIO = 0.8;
+
+function normalizedNetName(name: string): string {
+  return name.trim().toUpperCase();
+}
 
 // ── Rule: missing board outline ────────────────────────────────────────────
 
@@ -284,6 +307,281 @@ function checkHighVoltageClearance(input: PcbConstraintInput): PcbConstraintIssu
   return issues;
 }
 
+// ── Production review: drill file completeness ─────────────────────────────
+
+function checkDrillFile(input: PcbConstraintInput): PcbConstraintIssue[] {
+  if (input.hasDrillFile !== false) return [];
+  return [
+    pcbError('PCB_DRILL_FILE_MISSING', 'NC drill file is missing from the manufacturing package', {
+      remediationHint: 'Re-export the manufacturing package with Excellon/NC drill files included',
+      details: { hasDrillFile: input.hasDrillFile },
+    }),
+  ];
+}
+
+// ── Production review: copper-to-edge clearance ────────────────────────────
+
+function checkCopperToEdgeClearance(input: PcbConstraintInput): PcbConstraintIssue[] {
+  const issues: PcbConstraintIssue[] = [];
+  const violationCount = input.copperToEdgeViolationCount ?? 0;
+  const belowMinimum =
+    input.minCopperToEdgeMm !== undefined && input.minCopperToEdgeMm < MIN_COPPER_TO_EDGE_MM;
+
+  if (violationCount > 0 || belowMinimum) {
+    issues.push(
+      pcbError(
+        'PCB_COPPER_EDGE_CLEARANCE',
+        `Copper-to-edge clearance is below ${MIN_COPPER_TO_EDGE_MM}mm${input.minCopperToEdgeMm !== undefined ? ` (observed ${input.minCopperToEdgeMm}mm)` : ''}`,
+        {
+          remediationHint:
+            'Move copper, zones, vias, and pads away from the routed board edge or increase the copper-to-edge clearance rule',
+          details: {
+            minCopperToEdgeMm: input.minCopperToEdgeMm,
+            copperToEdgeViolationCount: violationCount,
+            recommendedMinimumMm: MIN_COPPER_TO_EDGE_MM,
+          },
+        },
+      ),
+    );
+  }
+
+  return issues;
+}
+
+// ── Production review: drill and annular ring capability ───────────────────
+
+function checkDrillManufacturability(input: PcbConstraintInput): PcbConstraintIssue[] {
+  const issues: PcbConstraintIssue[] = [];
+
+  if (input.minDrillMm !== undefined && input.minDrillMm < MIN_DRILL_MM) {
+    issues.push(
+      pcbWarning(
+        'PCB_DRILL_TOO_SMALL',
+        `Minimum drill diameter ${input.minDrillMm}mm is below common ${MIN_DRILL_MM}mm fabrication capability`,
+        {
+          remediationHint:
+            'Increase finished drill diameter or confirm the selected fabricator supports the requested drill size',
+          details: { minDrillMm: input.minDrillMm, recommendedMinimumMm: MIN_DRILL_MM },
+        },
+      ),
+    );
+  }
+
+  if (input.minAnnularRingMm !== undefined && input.minAnnularRingMm < MIN_ANNULAR_RING_MM) {
+    issues.push(
+      pcbWarning(
+        'PCB_ANNULAR_RING_TOO_SMALL',
+        `Minimum annular ring ${input.minAnnularRingMm}mm is below recommended ${MIN_ANNULAR_RING_MM}mm`,
+        {
+          remediationHint:
+            'Increase pad/via diameter or reduce drill size to maintain enough annular ring for registration tolerance',
+          details: {
+            minAnnularRingMm: input.minAnnularRingMm,
+            recommendedMinimumMm: MIN_ANNULAR_RING_MM,
+          },
+        },
+      ),
+    );
+  }
+
+  return issues;
+}
+
+// ── Production review: soldermask sliver ───────────────────────────────────
+
+function checkSolderMaskSliver(input: PcbConstraintInput): PcbConstraintIssue[] {
+  const violationCount = input.solderMaskSliverViolationCount ?? 0;
+  const belowMinimum =
+    input.minSolderMaskSliverMm !== undefined &&
+    input.minSolderMaskSliverMm < MIN_SOLDERMASK_SLIVER_MM;
+  if (!belowMinimum && violationCount === 0) return [];
+
+  return [
+    pcbWarning(
+      'PCB_SOLDERMASK_SLIVER',
+      `Soldermask sliver is below ${MIN_SOLDERMASK_SLIVER_MM}mm${input.minSolderMaskSliverMm !== undefined ? ` (observed ${input.minSolderMaskSliverMm}mm)` : ''}`,
+      {
+        remediationHint:
+          'Increase pad spacing, adjust soldermask expansion, or remove soldermask dams intentionally where supported',
+        details: {
+          minSolderMaskSliverMm: input.minSolderMaskSliverMm,
+          solderMaskSliverViolationCount: violationCount,
+          recommendedMinimumMm: MIN_SOLDERMASK_SLIVER_MM,
+        },
+      },
+    ),
+  ];
+}
+
+// ── Production review: silkscreen over pads ────────────────────────────────
+
+function checkSilkscreenOverPads(input: PcbConstraintInput): PcbConstraintIssue[] {
+  const count = input.silkscreenOverPadCount ?? 0;
+  if (count <= 0) return [];
+  return [
+    pcbWarning(
+      'PCB_SILKSCREEN_OVER_PAD',
+      `${count} silkscreen object${count === 1 ? '' : 's'} overlap exposed copper pads`,
+      {
+        remediationHint:
+          'Move or clip silkscreen references/graphics so they do not print over solderable pads',
+        details: { silkscreenOverPadCount: count },
+      },
+    ),
+  ];
+}
+
+// ── Production review: assembly fixtures/fiducials ─────────────────────────
+
+function checkAssemblyAlignmentFeatures(input: PcbConstraintInput): PcbConstraintIssue[] {
+  const issues: PcbConstraintIssue[] = [];
+  const smtCount = input.smtComponentCount ?? 0;
+  const fiducialCount = input.fiducialCount ?? (input.hasFiducials ? MIN_SMT_FIDUCIAL_COUNT : 0);
+  const toolingHoleCount = input.toolingHoleCount ?? 0;
+
+  if (smtCount > 0 && fiducialCount < MIN_SMT_FIDUCIAL_COUNT) {
+    issues.push(
+      pcbWarning(
+        'PCB_FIDUCIAL_REQUIRED',
+        `SMT assembly has ${fiducialCount} fiducial(s); at least ${MIN_SMT_FIDUCIAL_COUNT} are recommended`,
+        {
+          remediationHint:
+            'Add at least 3 fiducial marks (global, near board corners) for pick-and-place machine alignment',
+          details: {
+            smtComponentCount: smtCount,
+            fiducialCount,
+            recommendedMinimum: MIN_SMT_FIDUCIAL_COUNT,
+          },
+        },
+      ),
+    );
+  }
+
+  if (smtCount > 0 && toolingHoleCount < MIN_TOOLING_HOLE_COUNT) {
+    issues.push(
+      pcbWarning(
+        'PCB_TOOLING_HOLE_MISSING',
+        `Assembly tooling holes are below recommended count (${toolingHoleCount}/${MIN_TOOLING_HOLE_COUNT})`,
+        {
+          remediationHint:
+            'Add tooling holes or confirm the assembler will provide panel-level tooling holes during panelization',
+          details: {
+            smtComponentCount: smtCount,
+            toolingHoleCount,
+            recommendedMinimum: MIN_TOOLING_HOLE_COUNT,
+          },
+        },
+      ),
+    );
+  }
+
+  return issues;
+}
+
+// ── Production review: polarity/orientation marks ──────────────────────────
+
+function checkPolarityMarks(input: PcbConstraintInput): PcbConstraintIssue[] {
+  const polarizedCount = input.polarizedComponentCount ?? 0;
+  const markedCount = input.polarityMarkCount ?? 0;
+  const missingCount = Math.max(0, polarizedCount - markedCount);
+  if (missingCount === 0) return [];
+
+  return [
+    pcbWarning(
+      'PCB_POLARITY_MARK_MISSING',
+      `${missingCount} polarized/orientation-sensitive component${missingCount === 1 ? '' : 's'} lack polarity/orientation marks`,
+      {
+        remediationHint:
+          'Add clear silkscreen/courtyard polarity markers for diodes, LEDs, electrolytic capacitors, IC pin 1, and connectors',
+        details: {
+          polarizedComponentCount: polarizedCount,
+          polarityMarkCount: markedCount,
+          missingCount,
+        },
+      },
+    ),
+  ];
+}
+
+// ── Production review: component spacing/courtyard ─────────────────────────
+
+function checkComponentSpacing(input: PcbConstraintInput): PcbConstraintIssue[] {
+  const count = input.componentSpacingViolationCount ?? 0;
+  if (count <= 0) return [];
+  return [
+    pcbWarning(
+      'PCB_COMPONENT_SPACING_VIOLATION',
+      `${count} component spacing/courtyard violation${count === 1 ? '' : 's'} detected`,
+      {
+        remediationHint:
+          'Increase component-to-component spacing or review courtyard overlap for assembly nozzle, hand-solder, and rework access',
+        details: { componentSpacingViolationCount: count },
+      },
+    ),
+  ];
+}
+
+// ── Production review: testpoint coverage ──────────────────────────────────
+
+function checkTestpointCoverage(input: PcbConstraintInput): PcbConstraintIssue[] {
+  const criticalNets = [...new Set((input.criticalNetNames ?? []).map(normalizedNetName))];
+  if (criticalNets.length === 0) return [];
+  const testPointNets = new Set((input.testPointNets ?? []).map(normalizedNetName));
+  const missing = criticalNets.filter((net) => !testPointNets.has(net));
+  const coverage = (criticalNets.length - missing.length) / criticalNets.length;
+
+  if (coverage < MIN_TESTPOINT_COVERAGE_RATIO) {
+    return [
+      pcbWarning(
+        'PCB_TESTPOINT_COVERAGE_LOW',
+        `Critical-net testpoint coverage is ${(coverage * 100).toFixed(0)}%; ${missing.length} critical net(s) are missing test access`,
+        {
+          remediationHint:
+            'Add accessible test pads for power rails, ground, reset, boot, programming, clocks, and key interfaces',
+          details: {
+            criticalNetCount: criticalNets.length,
+            testPointNetCount: testPointNets.size,
+            missingCriticalNets: missing,
+            coverageRatio: coverage,
+            recommendedMinimumRatio: MIN_TESTPOINT_COVERAGE_RATIO,
+          },
+        },
+      ),
+    ];
+  }
+
+  return [];
+}
+
+// ── Production review: programming/debug access ────────────────────────────
+
+function checkProgrammingHeader(input: PcbConstraintInput): PcbConstraintIssue[] {
+  if (!input.requiresProgrammingHeader || input.hasProgrammingHeader !== false) return [];
+  return [
+    pcbError('PCB_PROGRAMMING_HEADER_MISSING', 'Programming/debug header is required but missing', {
+      remediationHint:
+        'Add a programming/debug connector or documented test pads for SWD/JTAG/UART/BOOT/RESET access',
+      details: {
+        requiresProgrammingHeader: true,
+        hasProgrammingHeader: input.hasProgrammingHeader,
+      },
+    }),
+  ];
+}
+
+// ── Production review: fabrication notes ───────────────────────────────────
+
+function checkFabricationNotes(input: PcbConstraintInput): PcbConstraintIssue[] {
+  if (input.hasFabricationNotes !== false) return [];
+  return [
+    pcbWarning('PCB_FAB_NOTES_MISSING', 'Fabrication notes are missing from the handoff package', {
+      remediationHint:
+        'Add fabrication notes covering board thickness, copper weight, finish, soldermask color, impedance requirements, panelization, and special instructions',
+      details: { hasFabricationNotes: input.hasFabricationNotes },
+    }),
+  ];
+}
+
 // ── Combine helper ─────────────────────────────────────────────────────────
 
 type RuleFn = (input: PcbConstraintInput) => PcbConstraintIssue[];
@@ -301,6 +599,17 @@ const RULES: RuleFn[] = [
   checkMissingManufacturingConstraints,
   checkFiducials,
   checkHighVoltageClearance,
+  checkDrillFile,
+  checkCopperToEdgeClearance,
+  checkDrillManufacturability,
+  checkSolderMaskSliver,
+  checkSilkscreenOverPads,
+  checkAssemblyAlignmentFeatures,
+  checkPolarityMarks,
+  checkComponentSpacing,
+  checkTestpointCoverage,
+  checkProgrammingHeader,
+  checkFabricationNotes,
 ];
 
 // ── Main entry point ───────────────────────────────────────────────────────
@@ -308,7 +617,7 @@ const RULES: RuleFn[] = [
 /**
  * Run all PCB constraint validation rules against board data.
  *
- * Orchestrates 12 rules:
+ * Orchestrates 23 rules:
  *   1. Missing outline         — error  if board outline is not defined
  *   2. Outline too small       — warning if dimensions are below 5mm
  *   3. Missing stackup         — warning if no detailed layer stack
@@ -321,6 +630,17 @@ const RULES: RuleFn[] = [
  *  10. Missing mfg constraints — warning if process/quantity unspecified
  *  11. Fiducials recommended   — warning if SMT board without fiducials
  *  12. High-voltage clearance  — error  if HV domain without proper clearance
+ *  13. Drill file              — error  if NC drill file is missing
+ *  14. Copper edge clearance   — error  if copper is too close to board edge
+ *  15. Drill/annular ring      — warning if process dimensions are risky
+ *  16. Soldermask sliver       — warning if soldermask web is too small
+ *  17. Silkscreen over pad     — warning if silkscreen overlaps exposed pads
+ *  18. Tooling holes           — warning if assembly tooling holes are missing
+ *  19. Polarity marks          — warning if orientation-sensitive parts lack marks
+ *  20. Component spacing       — warning if courtyard/spacing violations exist
+ *  21. Testpoint coverage      — warning if critical nets lack test access
+ *  22. Programming header      — error  if required debug/programming access is missing
+ *  23. Fabrication notes       — warning if handoff notes are missing
  */
 export function validatePcbConstraints(input: PcbConstraintInput): PcbConstraintResult {
   const errors: PcbConstraintIssue[] = [];
@@ -451,6 +771,25 @@ export function fromPcbIntent(pcb: {
   mountingHoles?: unknown[];
   fiducials?: unknown[];
   testPads?: unknown[];
+  hasDrillFile?: boolean;
+  minCopperToEdgeMm?: number;
+  copperToEdgeViolationCount?: number;
+  minDrillMm?: number;
+  minAnnularRingMm?: number;
+  minSolderMaskSliverMm?: number;
+  solderMaskSliverViolationCount?: number;
+  silkscreenOverPadCount?: number;
+  smtComponentCount?: number;
+  fiducialCount?: number;
+  toolingHoleCount?: number;
+  polarizedComponentCount?: number;
+  polarityMarkCount?: number;
+  componentSpacingViolationCount?: number;
+  criticalNetNames?: string[];
+  testPointNets?: string[];
+  hasProgrammingHeader?: boolean;
+  requiresProgrammingHeader?: boolean;
+  hasFabricationNotes?: boolean;
   manufacturingProcess?: string;
   manufacturing?: { process?: string; quantity?: number };
   quantity?: number;
@@ -471,6 +810,25 @@ export function fromPcbIntent(pcb: {
     hasPlacementZones: !!(pcb.placementZones && pcb.placementZones.length > 0),
     hasFiducials: !!(pcb.fiducials && pcb.fiducials.length > 0),
     hasTestPads: !!(pcb.testPads && pcb.testPads.length > 0),
+    hasDrillFile: pcb.hasDrillFile,
+    minCopperToEdgeMm: pcb.minCopperToEdgeMm,
+    copperToEdgeViolationCount: pcb.copperToEdgeViolationCount,
+    minDrillMm: pcb.minDrillMm,
+    minAnnularRingMm: pcb.minAnnularRingMm,
+    minSolderMaskSliverMm: pcb.minSolderMaskSliverMm,
+    solderMaskSliverViolationCount: pcb.solderMaskSliverViolationCount,
+    silkscreenOverPadCount: pcb.silkscreenOverPadCount,
+    smtComponentCount: pcb.smtComponentCount,
+    fiducialCount: pcb.fiducialCount ?? pcb.fiducials?.length,
+    toolingHoleCount: pcb.toolingHoleCount,
+    polarizedComponentCount: pcb.polarizedComponentCount,
+    polarityMarkCount: pcb.polarityMarkCount,
+    componentSpacingViolationCount: pcb.componentSpacingViolationCount,
+    criticalNetNames: pcb.criticalNetNames,
+    testPointNets: pcb.testPointNets,
+    hasProgrammingHeader: pcb.hasProgrammingHeader,
+    requiresProgrammingHeader: pcb.requiresProgrammingHeader,
+    hasFabricationNotes: pcb.hasFabricationNotes,
     hasHighVoltage: pcb.highVoltage ?? false,
     manufacturingProcess: pcb.manufacturingProcess ?? pcb.manufacturing?.process,
     hasQuantity:

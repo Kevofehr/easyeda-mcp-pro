@@ -43,6 +43,23 @@ export const NetValidationCode = {
   /** Net associated with AC/high-voltage lacks protective naming. */
   NetProtectedDomain: 'NET_PROTECTED_DOMAIN',
 
+  // ── Semantic ERC ─────────────────────────────────────────────────────
+
+  /** Multiple actively-driven outputs or power sources are tied together. */
+  NetOutputContention: 'NET_OUTPUT_CONTENTION',
+  /** A signal net has inputs but no driver, pull, or passive source. */
+  NetFloatingInput: 'NET_FLOATING_INPUT',
+  /** A power rail has conflicting power sources/regulators. */
+  NetPowerConflict: 'NET_POWER_CONFLICT',
+  /** A signal net only connects passive pins and cannot be driven. */
+  NetPassiveOnly: 'NET_PASSIVE_ONLY',
+  /** A required power/ground pin is missing or connected to the wrong class of net. */
+  NetUnpoweredDevice: 'NET_UNPOWERED_DEVICE',
+  /** A device marked as requiring decoupling has no local capacitor across rail and ground. */
+  NetMissingDecoupling: 'NET_MISSING_DECOUPLING',
+  /** A pin expected voltage is incompatible with the connected net voltage. */
+  NetVoltageMismatch: 'NET_VOLTAGE_MISMATCH',
+
   // ── General ──────────────────────────────────────────────────────────
 
   /** Validation could not be completed due to an internal error. */

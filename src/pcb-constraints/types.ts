@@ -22,6 +22,18 @@ export type PcbConstraintCode =
   | 'PCB_MISSING_MANUFACTURING_CONSTRAINTS'
   | 'PCB_FIDUCIAL_REQUIRED'
   | 'PCB_HIGH_VOLTAGE_CLEARANCE'
+  | 'PCB_DRILL_FILE_MISSING'
+  | 'PCB_COPPER_EDGE_CLEARANCE'
+  | 'PCB_DRILL_TOO_SMALL'
+  | 'PCB_ANNULAR_RING_TOO_SMALL'
+  | 'PCB_SOLDERMASK_SLIVER'
+  | 'PCB_SILKSCREEN_OVER_PAD'
+  | 'PCB_TOOLING_HOLE_MISSING'
+  | 'PCB_POLARITY_MARK_MISSING'
+  | 'PCB_COMPONENT_SPACING_VIOLATION'
+  | 'PCB_TESTPOINT_COVERAGE_LOW'
+  | 'PCB_PROGRAMMING_HEADER_MISSING'
+  | 'PCB_FAB_NOTES_MISSING'
   | 'PCB_CONSTRAINT_INTERNAL';
 
 // ── Constraint issue ───────────────────────────────────────────────────────
@@ -100,6 +112,44 @@ export interface PcbConstraintInput {
   hasFiducials?: boolean;
   /** Whether test pads are defined. */
   hasTestPads?: boolean;
+  /** Whether the drill/NC drill file is present in the manufacturing package. */
+  hasDrillFile?: boolean;
+  /** Minimum copper-to-board-edge clearance observed in mm. */
+  minCopperToEdgeMm?: number;
+  /** Number of copper-to-edge clearance violations. */
+  copperToEdgeViolationCount?: number;
+  /** Minimum finished/mechanical drill diameter observed in mm. */
+  minDrillMm?: number;
+  /** Minimum annular ring observed in mm. */
+  minAnnularRingMm?: number;
+  /** Minimum soldermask web/sliver observed in mm. */
+  minSolderMaskSliverMm?: number;
+  /** Count of soldermask sliver violations. */
+  solderMaskSliverViolationCount?: number;
+  /** Count of silkscreen objects overlapping copper pads. */
+  silkscreenOverPadCount?: number;
+  /** Number of SMT components requiring assembly alignment. */
+  smtComponentCount?: number;
+  /** Count of global/local fiducials. Overrides hasFiducials when provided. */
+  fiducialCount?: number;
+  /** Count of tooling holes for panel/fixture assembly. */
+  toolingHoleCount?: number;
+  /** Number of polarized/orientation-sensitive components. */
+  polarizedComponentCount?: number;
+  /** Number of polarized components with explicit polarity/orientation marks. */
+  polarityMarkCount?: number;
+  /** Count of component courtyard/spacing violations. */
+  componentSpacingViolationCount?: number;
+  /** Critical nets that should be accessible for bring-up/test. */
+  criticalNetNames?: string[];
+  /** Nets that have test pads/probes. */
+  testPointNets?: string[];
+  /** Whether a programming/debug header is present when required. */
+  hasProgrammingHeader?: boolean;
+  /** Whether this design requires a programming/debug header. */
+  requiresProgrammingHeader?: boolean;
+  /** Whether fabrication notes are present in the handoff package. */
+  hasFabricationNotes?: boolean;
   /** Whether the design contains high-voltage domains. */
   hasHighVoltage?: boolean;
   /** Manufacturing process (lead-free, lead-based, mixed). */

@@ -129,6 +129,90 @@ export const PcbConstraintCodeMap: Record<string, PcbConstraintCodeEntry> = {
     remediationHint:
       'Define explicit creepage and clearance distances for high-voltage nets. Minimum 4mm clearance for 250V AC is recommended.',
   },
+
+  DRILL_FILE_MISSING: {
+    code: 'PCB_DRILL_FILE_MISSING',
+    message: 'NC drill file is missing from the manufacturing package',
+    severity: 'error',
+    remediationHint: 'Re-export the manufacturing package with Excellon/NC drill files included',
+  },
+  COPPER_EDGE_CLEARANCE: {
+    code: 'PCB_COPPER_EDGE_CLEARANCE',
+    message: 'Copper is too close to the board edge',
+    severity: 'error',
+    remediationHint:
+      'Move copper, zones, vias, and pads away from the routed board edge or increase the copper-to-edge clearance rule',
+  },
+  DRILL_TOO_SMALL: {
+    code: 'PCB_DRILL_TOO_SMALL',
+    message: 'Minimum drill diameter is below common fabrication capability',
+    severity: 'warning',
+    remediationHint:
+      'Increase finished drill diameter or confirm the selected fabricator supports the requested drill size',
+  },
+  ANNULAR_RING_TOO_SMALL: {
+    code: 'PCB_ANNULAR_RING_TOO_SMALL',
+    message: 'Annular ring is below recommended manufacturing minimum',
+    severity: 'warning',
+    remediationHint:
+      'Increase pad/via diameter or reduce drill size to maintain enough annular ring for registration tolerance',
+  },
+  SOLDERMASK_SLIVER: {
+    code: 'PCB_SOLDERMASK_SLIVER',
+    message: 'Soldermask sliver is below recommended minimum',
+    severity: 'warning',
+    remediationHint:
+      'Increase pad spacing, adjust soldermask expansion, or remove soldermask dams intentionally where supported',
+  },
+  SILKSCREEN_OVER_PAD: {
+    code: 'PCB_SILKSCREEN_OVER_PAD',
+    message: 'Silkscreen overlaps exposed copper pads',
+    severity: 'warning',
+    remediationHint:
+      'Move or clip silkscreen references/graphics so they do not print over solderable pads',
+  },
+  TOOLING_HOLE_MISSING: {
+    code: 'PCB_TOOLING_HOLE_MISSING',
+    message: 'Tooling holes are missing for assembly/panel fixture alignment',
+    severity: 'warning',
+    remediationHint:
+      'Add tooling holes or confirm the assembler will provide panel-level tooling holes during panelization',
+  },
+  POLARITY_MARK_MISSING: {
+    code: 'PCB_POLARITY_MARK_MISSING',
+    message: 'Polarity or orientation marks are missing for polarized components',
+    severity: 'warning',
+    remediationHint:
+      'Add clear silkscreen/courtyard polarity markers for diodes, LEDs, electrolytic capacitors, IC pin 1, and connectors',
+  },
+  COMPONENT_SPACING_VIOLATION: {
+    code: 'PCB_COMPONENT_SPACING_VIOLATION',
+    message: 'Component spacing/courtyard violations detected',
+    severity: 'warning',
+    remediationHint:
+      'Increase component-to-component spacing or review courtyard overlap for assembly nozzle, hand-solder, and rework access',
+  },
+  TESTPOINT_COVERAGE_LOW: {
+    code: 'PCB_TESTPOINT_COVERAGE_LOW',
+    message: 'Critical nets are missing test points',
+    severity: 'warning',
+    remediationHint:
+      'Add accessible test pads for power rails, ground, reset, boot, programming, clocks, and key interfaces',
+  },
+  PROGRAMMING_HEADER_MISSING: {
+    code: 'PCB_PROGRAMMING_HEADER_MISSING',
+    message: 'Programming/debug header is required but missing',
+    severity: 'error',
+    remediationHint:
+      'Add a programming/debug connector or documented test pads for SWD/JTAG/UART/BOOT/RESET access',
+  },
+  FAB_NOTES_MISSING: {
+    code: 'PCB_FAB_NOTES_MISSING',
+    message: 'Fabrication notes are missing from the handoff package',
+    severity: 'warning',
+    remediationHint:
+      'Add fabrication notes covering board thickness, copper weight, finish, soldermask color, impedance requirements, panelization, and special instructions',
+  },
 } as const;
 
 // ── Factory helpers ────────────────────────────────────────────────────────

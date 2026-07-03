@@ -4,6 +4,70 @@ import { type EnvConfig } from '../config/env.js';
 import { validatePcbConstraints, buildConstraintReport } from '../pcb-constraints/index.js';
 import type { PcbConstraintInput } from '../pcb-constraints/types.js';
 
+const pcbBoardDataSchema = z.object({
+  widthMm: z.number().nonnegative().optional(),
+  heightMm: z.number().nonnegative().optional(),
+  layerCount: z.number().int().nonnegative().optional(),
+  hasOutline: z.boolean().optional(),
+  mountingHoleCount: z.number().int().nonnegative().optional(),
+  hasLayerStack: z.boolean().optional(),
+  hasNetClasses: z.boolean().optional(),
+  hasClearanceRules: z.boolean().optional(),
+  hasKeepoutAreas: z.boolean().optional(),
+  hasPlacementZones: z.boolean().optional(),
+  hasFiducials: z.boolean().optional(),
+  hasTestPads: z.boolean().optional(),
+  hasDrillFile: z.boolean().optional(),
+  minCopperToEdgeMm: z.number().nonnegative().optional(),
+  copperToEdgeViolationCount: z.number().int().nonnegative().optional(),
+  minDrillMm: z.number().nonnegative().optional(),
+  minAnnularRingMm: z.number().nonnegative().optional(),
+  minSolderMaskSliverMm: z.number().nonnegative().optional(),
+  solderMaskSliverViolationCount: z.number().int().nonnegative().optional(),
+  silkscreenOverPadCount: z.number().int().nonnegative().optional(),
+  smtComponentCount: z.number().int().nonnegative().optional(),
+  fiducialCount: z.number().int().nonnegative().optional(),
+  toolingHoleCount: z.number().int().nonnegative().optional(),
+  polarizedComponentCount: z.number().int().nonnegative().optional(),
+  polarityMarkCount: z.number().int().nonnegative().optional(),
+  componentSpacingViolationCount: z.number().int().nonnegative().optional(),
+  criticalNetNames: z.array(z.string()).optional(),
+  testPointNets: z.array(z.string()).optional(),
+  hasProgrammingHeader: z.boolean().optional(),
+  requiresProgrammingHeader: z.boolean().optional(),
+  hasFabricationNotes: z.boolean().optional(),
+  hasHighVoltage: z.boolean().optional(),
+  manufacturingProcess: z.string().optional(),
+  hasQuantity: z.boolean().optional(),
+});
+
+const pcbIssueSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+  severity: z.string(),
+  path: z.string().optional(),
+  remediationHint: z.string(),
+  details: z.record(z.string(), z.unknown()).optional(),
+});
+
+function mapPcbIssue(issue: {
+  code: string;
+  message: string;
+  severity: string;
+  path?: string;
+  remediationHint: string;
+  details?: Record<string, unknown>;
+}) {
+  return {
+    code: issue.code,
+    message: issue.message,
+    severity: issue.severity,
+    path: issue.path,
+    remediationHint: issue.remediationHint,
+    details: issue.details,
+  };
+}
+
 /**
  * Fetch board data from the live EasyEDA bridge when no explicit boardData is provided.
  * Queries dimensions, layers, and stackup in parallel via Promise.allSettled.
@@ -80,47 +144,13 @@ function registerPcbConstraintTools(
     },
     inputSchema: z.object({
       projectId: z.string(),
-      boardData: z
-        .object({
-          widthMm: z.number().nonnegative().optional(),
-          heightMm: z.number().nonnegative().optional(),
-          layerCount: z.number().int().nonnegative().optional(),
-          hasOutline: z.boolean().optional(),
-          mountingHoleCount: z.number().int().nonnegative().optional(),
-          hasLayerStack: z.boolean().optional(),
-          hasNetClasses: z.boolean().optional(),
-          hasClearanceRules: z.boolean().optional(),
-          hasKeepoutAreas: z.boolean().optional(),
-          hasPlacementZones: z.boolean().optional(),
-          hasFiducials: z.boolean().optional(),
-          hasTestPads: z.boolean().optional(),
-          hasHighVoltage: z.boolean().optional(),
-          manufacturingProcess: z.string().optional(),
-          hasQuantity: z.boolean().optional(),
-        })
-        .optional(),
+      boardData: pcbBoardDataSchema.optional(),
     }),
     outputSchema: z.object({
       project_id: z.string(),
       valid: z.boolean(),
-      errors: z.array(
-        z.object({
-          code: z.string(),
-          message: z.string(),
-          severity: z.string(),
-          path: z.string().optional(),
-          remediationHint: z.string(),
-        }),
-      ),
-      warnings: z.array(
-        z.object({
-          code: z.string(),
-          message: z.string(),
-          severity: z.string(),
-          path: z.string().optional(),
-          remediationHint: z.string(),
-        }),
-      ),
+      errors: z.array(pcbIssueSchema),
+      warnings: z.array(pcbIssueSchema),
       summary: z.object({
         totalChecks: z.number(),
         passed: z.number(),
@@ -150,26 +180,102 @@ function registerPcbConstraintTools(
         return {
           project_id: projectId,
           valid: result.valid,
-          errors: result.errors.map((e) => ({
-            code: e.code,
-            message: e.message,
-            severity: e.severity,
-            path: e.path,
-            remediationHint: e.remediationHint,
-          })),
-          warnings: result.warnings.map((w) => ({
-            code: w.code,
-            message: w.message,
-            severity: w.severity,
-            path: w.path,
-            remediationHint: w.remediationHint,
-          })),
+          errors: result.errors.map(mapPcbIssue),
+          warnings: result.warnings.map(mapPcbIssue),
           summary: result.summary,
         };
       } catch (err) {
         return {
           project_id: projectId,
           valid: false,
+          errors: [],
+          warnings: [],
+          summary: { totalChecks: 0, passed: 0, failed: 0, notApplicable: 0 },
+          not_available: true,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  });
+
+  registry.register({
+    name: 'easyeda_pcb_production_review',
+    title: 'Run PCB production review',
+    description:
+      'Run fabrication, assembly, and testability production review rules for PCB handoff. Reports severity-ranked DFM/DFA/DFT findings with actionable remediation before Gerber export or manufacturing submission.',
+    profile: 'core',
+    evidence: ['inferred'],
+    risk: 'medium',
+    confirmWrite: false,
+    group: 'pcb-constraints',
+    version: '1.0.0',
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+    inputSchema: z.object({
+      projectId: z.string(),
+      boardData: pcbBoardDataSchema.optional(),
+      gateMode: z.enum(['warn', 'block', 'off']).default('warn'),
+    }),
+    outputSchema: z.object({
+      project_id: z.string(),
+      passed: z.boolean(),
+      blocked: z.boolean(),
+      gate_mode: z.string(),
+      severity_counts: z.object({
+        errors: z.number().int().nonnegative(),
+        warnings: z.number().int().nonnegative(),
+        total: z.number().int().nonnegative(),
+      }),
+      errors: z.array(pcbIssueSchema),
+      warnings: z.array(pcbIssueSchema),
+      summary: z.object({
+        totalChecks: z.number(),
+        passed: z.number(),
+        failed: z.number(),
+        notApplicable: z.number(),
+      }),
+      not_available: z.boolean().optional(),
+    }),
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const { projectId, boardData, gateMode } = params as {
+        projectId: string;
+        boardData?: Partial<PcbConstraintInput>;
+        gateMode?: 'warn' | 'block' | 'off';
+      };
+
+      try {
+        const input = boardData
+          ? (boardData as PcbConstraintInput)
+          : await fetchBoardDataFromBridge(ctx, projectId);
+        const result = validatePcbConstraints(input);
+        const errors = result.errors.map(mapPcbIssue);
+        const warnings = result.warnings.map(mapPcbIssue);
+        const mode = gateMode ?? 'warn';
+
+        return {
+          project_id: projectId,
+          passed: result.valid,
+          blocked: mode === 'block' && errors.length > 0,
+          gate_mode: mode,
+          severity_counts: {
+            errors: errors.length,
+            warnings: warnings.length,
+            total: errors.length + warnings.length,
+          },
+          errors,
+          warnings,
+          summary: result.summary,
+        };
+      } catch (err) {
+        return {
+          project_id: projectId,
+          passed: false,
+          blocked: gateMode === 'block',
+          gate_mode: gateMode ?? 'warn',
+          severity_counts: { errors: 0, warnings: 0, total: 0 },
           errors: [],
           warnings: [],
           summary: { totalChecks: 0, passed: 0, failed: 0, notApplicable: 0 },
@@ -197,25 +303,7 @@ function registerPcbConstraintTools(
     },
     inputSchema: z.object({
       projectId: z.string(),
-      boardData: z
-        .object({
-          widthMm: z.number().nonnegative().optional(),
-          heightMm: z.number().nonnegative().optional(),
-          layerCount: z.number().int().nonnegative().optional(),
-          hasOutline: z.boolean().optional(),
-          mountingHoleCount: z.number().int().nonnegative().optional(),
-          hasLayerStack: z.boolean().optional(),
-          hasNetClasses: z.boolean().optional(),
-          hasClearanceRules: z.boolean().optional(),
-          hasKeepoutAreas: z.boolean().optional(),
-          hasPlacementZones: z.boolean().optional(),
-          hasFiducials: z.boolean().optional(),
-          hasTestPads: z.boolean().optional(),
-          hasHighVoltage: z.boolean().optional(),
-          manufacturingProcess: z.string().optional(),
-          hasQuantity: z.boolean().optional(),
-        })
-        .optional(),
+      boardData: pcbBoardDataSchema.optional(),
     }),
     outputSchema: z.object({
       project_id: z.string(),

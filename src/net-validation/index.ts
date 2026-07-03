@@ -21,9 +21,12 @@ export {
 } from './schema.js';
 export type {
   NetValidationEntry,
+  NetValidationNode,
   DeviceValidationEntry,
   InterfaceValidationEntry,
   NetValidationInput,
+  PinElectricalType,
+  PinValidationMetadata,
 } from './schema.js';
 
 export { validateNets, validateNetsOrThrow } from './validation.js';

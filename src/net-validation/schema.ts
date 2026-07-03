@@ -156,6 +156,48 @@ export const NET_TYPE_EXPECTED_DOMAIN: Record<string, NetDomain[]> = {
  * so that validation can operate on net data from any source
  * (CircuitIR, EasyEDA bridge, hand-authored test data).
  */
+export type PinElectricalType =
+  | 'input'
+  | 'output'
+  | 'bidirectional'
+  | 'passive'
+  | 'power_input'
+  | 'power_output'
+  | 'power_source'
+  | 'open_drain'
+  | 'tri_state'
+  | 'no_connect';
+
+/** How a pin should be interpreted by semantic ERC. */
+export interface PinValidationMetadata {
+  /** Pin number or name as it appears in net nodes. */
+  pin: string;
+  /** Human-readable pin name, e.g. VDD, GND, EN, OUT. */
+  name?: string;
+  /** Electrical type used for compatibility checks. */
+  electricalType: PinElectricalType;
+  /** Whether this pin must be connected for the device to be valid. */
+  required?: boolean;
+  /** Expected net classification for required power/ground/signal pins. */
+  expectedNetType?: 'power' | 'signal' | 'ground';
+  /** Expected nominal voltage for voltage-domain checks. */
+  expectedVoltage?: number;
+  /** Whether this pin intentionally allows no-connect. */
+  noConnectAllowed?: boolean;
+}
+
+/** A connected device pin, optionally carrying semantic pin metadata. */
+export interface NetValidationNode {
+  deviceRef: string;
+  pin: string;
+  /** Optional per-node electrical type; device pin metadata takes precedence when both exist. */
+  electricalType?: PinElectricalType;
+  /** Optional human-readable pin name. */
+  pinName?: string;
+  /** Optional expected nominal voltage for this pin. */
+  expectedVoltage?: number;
+}
+
 export interface NetValidationEntry {
   /** Unique net identifier. */
   id: string;
@@ -163,8 +205,10 @@ export interface NetValidationEntry {
   name: string;
   /** Net type classification. */
   type: 'power' | 'signal' | 'ground';
+  /** Optional nominal voltage for voltage-domain checks. */
+  voltage?: number;
   /** Connected device pins, may be empty for floating nets. */
-  nodes: Array<{ deviceRef: string; pin: string }>;
+  nodes: NetValidationNode[];
 }
 
 /**
@@ -177,6 +221,10 @@ export interface DeviceValidationEntry {
   ref: string;
   /** Functional category for determining required pins. */
   category?: string;
+  /** Semantic pin metadata used by ERC rules. */
+  pins?: PinValidationMetadata[];
+  /** Require at least one local capacitor between each power input rail and ground. */
+  requiresDecoupling?: boolean;
 }
 
 /**
