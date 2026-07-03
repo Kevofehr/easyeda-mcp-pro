@@ -232,7 +232,9 @@ function dbg(message: string): void {
 // Toast + Log panel — connection-lifecycle events the user should both see pop up
 // and have a persistent record of.
 function diagToast(message: string): void {
-  showToast(`[diag] ${message}`);
+  // Diagnostics go to the persistent Log panel ONLY — never as toasts — so the
+  // connect/reconnect lifecycle (handshake attempts, open events, etc.) can
+  // never spam pop-ups. Read them in EasyEDA's bottom "Log" panel.
   logPanel(`[diag] ${message}`);
 }
 
@@ -2167,8 +2169,9 @@ function send(data: JsonValue): void {
       // A throw here means a POST-connect send failed (the socket died) — the
       // handshake no longer uses this path, so this is a genuine link drop.
       log('sysWs.send threw after connect — link dropped', err);
+      // Auto-recovery — log it, don't pop a toast (the reconnect is silent).
       if (!manualDisconnectRequested) {
-        showToast('MCP Bridge: link dropped — auto-reconnecting…');
+        logPanel('MCP Bridge: link dropped — auto-reconnecting');
       }
       closeSocket();
     }
@@ -2228,7 +2231,7 @@ function buildHandshake(): Record<string, unknown> {
     protocolVersion: BRIDGE_VERSION,
     contractVersion: BRIDGE_CONTRACT_VERSION,
     clientName: 'easyeda-mcp-pro',
-    extensionVersion: '0.7.2', // x-release-please-version
+    extensionVersion: '0.7.3', // x-release-please-version
     easyedaVersion: getEasyedaVersion(),
     devMode: false,
   };
@@ -2322,10 +2325,8 @@ function startHeartbeat(): void {
     if (connectionState !== 'connected') return;
     const silentMs = Date.now() - lastInboundMs;
     if (silentMs > livenessTimeoutMs) {
-      diagToast(`server silent ${Math.round(silentMs / 1000)}s — reconnecting`);
-      if (!manualDisconnectRequested) {
-        showToast('MCP Bridge: server went silent — reconnecting…');
-      }
+      // Auto-recovery — log it, don't pop a toast (the reconnect is silent).
+      logPanel(`MCP Bridge: server silent ${Math.round(silentMs / 1000)}s — reconnecting`);
       closeSocket(); // → scheduleReconnect()
     }
   }, WATCHDOG_CHECK_MS);
@@ -2654,6 +2655,10 @@ function showStatus(): void {
 
 function scheduleReconnect(): void {
   if (manualDisconnectRequested || reconnectTimer) return;
+  // Never schedule a reconnect while already connected or a connect is in
+  // flight — a stray drop signal could otherwise spin up a parallel port scan
+  // that churns dead ports (and spams the log) alongside the live connection.
+  if (connectionState === 'connected' || activeConnectPromise) return;
   reconnectAttempts += 1;
   const delay = Math.min(RECONNECT_BASE_MS * 2 ** (reconnectAttempts - 1), RECONNECT_MAX_MS);
   reconnectTimer = setTimeout(() => {
