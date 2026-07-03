@@ -27,7 +27,7 @@ The server supports four deployment modes, each with a distinct security posture
 - The server listens on `127.0.0.1` (loopback only) by default.
 - Rate limiting is applied (default 100 req/min per IP).
 - Security headers are added to all responses.
-- OAuth is optional in loopback mode; `HTTP_AUTH_DISABLED` can be set to `true` for local development.
+- OAuth is optional in loopback mode; `HTTP_AUTH_DISABLED` can be set to `true` only for non-production local development.
 - **Trust model**: Only processes on the same machine can reach the server. This is suitable for local AI assistants and custom integrations.
 
 ### 1.3 Remote HTTP
@@ -63,7 +63,8 @@ When `OAUTH_ENABLED=true`, every request to `/mcp` must include an `Authorizatio
    - `aud` (audience) — must match `OAUTH_AUDIENCE` (default `easyeda-mcp-pro`).
    - `exp` (expiration) — token must not be expired.
 5. Token type (`typ` header) is checked — non-JWT tokens are rejected.
-6. On validation failure, detailed error codes are returned: `token_expired`, `invalid_issuer`, `invalid_audience`, `invalid_signature`, `missing_auth`.
+6. Required scopes from `OAUTH_REQUIRED_SCOPES` are enforced against `scope`, `scp`, `permissions`, or `roles` claims.
+7. On validation failure, detailed error codes are returned: `token_expired`, `invalid_issuer`, `invalid_audience`, `invalid_signature`, `missing_auth`, `insufficient_scope`.
 
 **Configuration requirements for non-loopback HTTP:**
 
@@ -75,7 +76,7 @@ OAUTH_JWKS_URI=https://your-idp.example.com/.well-known/jwks.json
 OAUTH_REQUIRED_SCOPES=easyeda:read
 ```
 
-The server enforces a startup safety check: **non-loopback HTTP without OAuth is rejected with an error**.
+The server enforces startup safety checks: **non-loopback HTTP without OAuth is rejected**, and `HTTP_AUTH_DISABLED=true` is rejected for production or non-loopback HTTP.
 
 ### 2.2 Bridge Pairing Authentication
 
@@ -176,12 +177,13 @@ The `ToolRegistry` enforces unique tool names at registration time — duplicate
 - Active entries are cleaned up when the store exceeds 1000 entries.
 
 **Security headers (applied to all HTTP responses):**
-| Header | Value | Purpose |
-| :----- | :---- | :------ |
-| `X-Content-Type-Options` | `nosniff` | Prevents MIME type sniffing |
-| `X-Frame-Options` | `DENY` | Prevents clickjacking |
-| `X-XSS-Protection` | `0` | Disables legacy XSS filter (preventsXSS in modern browsers) |
-| `Referrer-Policy` | `strict-origin-when-cross-origin` | Controls referrer header leakage |
+
+| Header                   | Value                             | Purpose                                                      |
+| :----------------------- | :-------------------------------- | :----------------------------------------------------------- |
+| `X-Content-Type-Options` | `nosniff`                         | Prevents MIME type sniffing                                  |
+| `X-Frame-Options`        | `DENY`                            | Prevents clickjacking                                        |
+| `X-XSS-Protection`       | `0`                               | Disables legacy XSS filter (prevents XSS in modern browsers) |
+| `Referrer-Policy`        | `strict-origin-when-cross-origin` | Controls referrer header leakage                             |
 
 **Origin validation (CORS):**
 
@@ -280,7 +282,7 @@ Every unsafe configuration override has a safe default. The following table docu
 | `BRIDGE_RAW_EXEC_ENABLED`   | `false`       | `true`                         | **Critical** — enables raw JavaScript execution | Development/testing only                    |
 | `BRIDGE_TOKEN`              | `''`          | Set to a shared secret         | **Medium** — enables bridge pairing             | Non-loopback bridge connections             |
 | `EASYEDA_DEV_BRIDGE`        | `false`       | `true`                         | **Medium** — enables dev bridge features        | Development only                            |
-| `HTTP_AUTH_DISABLED`        | `false`       | `true`                         | **High** — disables all HTTP auth               | Local development, testing                  |
+| `HTTP_AUTH_DISABLED`        | `false`       | `true`                         | **High** — disables all HTTP auth               | Non-production loopback development only    |
 | `NODE_ENV`                  | `development` | `production`                   | **Medium** — enables production safety checks   | Production deployment                       |
 | `JLCPCB_ENABLE_ORDERING`    | `false`       | `true`                         | **High** — enables ordering via API             | When JLCPCB ordering is needed              |
 | `AI_ALLOW_DESIGN_MUTATIONS` | `false`       | `true`                         | **High** — allows AI to modify designs          | Experimental AI-assisted design             |
@@ -469,7 +471,7 @@ Path traversal protection is enforced in all export tools — artifact paths are
 ### 11.1 Enabling HTTP Mode
 
 - [ ] Set `TRANSPORT=http`.
-- [ ] For **loopback** (127.0.0.1): OK with defaults. Optionally set `HTTP_AUTH_DISABLED=true` for local tooling.
+- [ ] For **loopback** (127.0.0.1): OK with defaults. Optionally set `HTTP_AUTH_DISABLED=true` only for non-production local tooling.
 - [ ] For **remote access**:
   - [ ] Set `HTTP_HOST` to the bind address (e.g., `0.0.0.0` or LAN IP).
   - [ ] Configure OAuth:
@@ -520,7 +522,7 @@ Path traversal protection is enforced in all export tools — artifact paths are
   - [ ] `BRIDGE_RAW_EXEC_ENABLED=false`.
   - [ ] `JLCPCB_ENABLE_ORDERING` → requires `JLCPCB_MODE=approved_api`.
   - [ ] `HTTP_HOST` is loopback OR OAuth is enabled.
-  - [ ] `HTTP_AUTH_DISABLED` is `false` for any non-loopback HTTP.
+  - [ ] `HTTP_AUTH_DISABLED` is `false` for production and for any non-loopback HTTP.
 - [ ] Run full CI gate locally:
   - [ ] `pnpm install --frozen-lockfile`
   - [ ] `pnpm format:check`

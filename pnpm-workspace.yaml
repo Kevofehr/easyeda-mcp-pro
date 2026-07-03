@@ -5,3 +5,8 @@ packages:
 allowBuilds:
   esbuild: true
 minimumReleaseAge: 0
+
+overrides:
+  vite: 7.3.5
+  '@vitejs/plugin-vue': 6.0.7
+  esbuild: 0.28.1

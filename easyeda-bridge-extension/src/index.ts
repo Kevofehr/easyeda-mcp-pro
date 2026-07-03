@@ -30,12 +30,7 @@ function getInfoToastType(): string {
 }
 
 type JsonValue =
-  | string
-  | number
-  | boolean
-  | null
-  | JsonValue[]
-  | { [key: string]: JsonValue | undefined };
+  string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue | undefined };
 
 type ConnectMode = 'manual' | 'auto';
 type ConnectionState = 'disconnected' | 'connecting' | 'connected';
@@ -113,6 +108,7 @@ const BRIDGE_CONTRACT_VERSION = 1;
 const BRIDGE_PORT = 49620;
 const PORT_SCAN_COUNT = 10;
 const CONNECT_TIMEOUT_MS = 8000;
+const EASYEDA_REGISTER_OPEN_FALLBACK_MS = 600;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 const STORAGE_KEY = 'easyeda-mcp-pro:autoConnect';
@@ -141,6 +137,7 @@ let connectRunId = 0;
 let manualDisconnectRequested = false;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let externalInteractionWarningShown = false;
 
 function getGlobal(): EasyedaGlobal | null {
   if (typeof eda !== 'undefined' && eda) return eda;
@@ -223,6 +220,15 @@ function dbg(message: string): void {
 function diagToast(message: string): void {
   showToast(`[diag] ${message}`);
   logPanel(`[diag] ${message}`);
+}
+
+function showExternalInteractionHintOnce(error?: unknown): void {
+  const message =
+    'MCP Bridge needs EasyEDA External Interactions permission. Enable it in Extension Manager for MCP Pro Bridge.';
+  log(message, error);
+  if (externalInteractionWarningShown) return;
+  externalInteractionWarningShown = true;
+  showToast(message);
 }
 
 function readPath<T>(source: unknown, path: string): T | undefined {
@@ -2144,7 +2150,9 @@ function createSocket(
 ): SocketHandle | null {
   const sysWs = getWsApi();
 
-  // Try easyeda-register first (may throw if external interaction is denied)
+  // Try easyeda-register first (may throw if external interaction is denied).
+  // EasyEDA Pro v3.2.x can also create the socket but never call connectedCallFn,
+  // so fire the open hook through a guarded fallback timer as well.
   if (sysWs?.register && sysWs.send) {
     try {
       let openFired = false;
@@ -2163,9 +2171,10 @@ function createSocket(
       // FIX: in EasyEDA Pro v3 the connectedCallFn may never fire, so the handshake never
       // gets sent. Trigger it via a fallback timer too (the official EasyEDA reference
       // extension also does not rely on connectedCallFn as the send trigger).
-      setTimeout(() => fireOpen('fallback-timer'), 600);
+      setTimeout(() => fireOpen('fallback-timer'), EASYEDA_REGISTER_OPEN_FALLBACK_MS);
       return { type: 'easyeda-register', id };
     } catch (err) {
+      showExternalInteractionHintOnce(err);
       diagToast(`register threw: ${String(err)}`);
       log('register() threw, falling through', err);
     }
@@ -2275,7 +2284,7 @@ function buildHandshake(): Record<string, unknown> {
     protocolVersion: BRIDGE_VERSION,
     contractVersion: BRIDGE_CONTRACT_VERSION,
     clientName: 'easyeda-mcp-pro',
-    extensionVersion: '0.6.0',
+    extensionVersion: '0.7.0', // x-release-please-version
     easyedaVersion: getEasyedaVersion(),
     devMode: false,
   };

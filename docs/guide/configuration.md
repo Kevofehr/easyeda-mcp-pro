@@ -61,7 +61,7 @@ Suppliers are optional and disabled by default. Set the following variables to e
 
 By default, the server uses standard I/O (stdio) transport. To run as an HTTP server:
 
-```env
+```ini
 TRANSPORT=http
 HTTP_HOST=127.0.0.1
 HTTP_PORT=3000
@@ -74,7 +74,7 @@ Loopback HTTP deployments validate browser `Origin` headers and only accept loop
 
 For remote HTTP deployments, OAuth 2.0 validation can be enforced:
 
-```env
+```ini
 OAUTH_ENABLED=true
 OAUTH_ISSUER=https://your-identity-provider.com
 OAUTH_JWKS_URI=https://your-identity-provider.com/.well-known/jwks.json

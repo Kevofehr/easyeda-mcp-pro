@@ -171,6 +171,17 @@ export function validateSafeConfig(config: EnvConfig): void {
     process.exit(1);
   }
 
+  // ── HTTP auth bypass policy ───────────────────────────────
+  if (config.TRANSPORT === 'http' && config.HTTP_AUTH_DISABLED) {
+    if (config.NODE_ENV === 'production' || !isLoopbackHost(config.HTTP_HOST)) {
+      console.error(
+        'SAFETY: HTTP_AUTH_DISABLED=true is only allowed for non-production loopback HTTP. ' +
+          'Use OAUTH_ENABLED=true for remote or production HTTP deployments.',
+      );
+      process.exit(1);
+    }
+  }
+
   // ── OAuth/JWKS validation ─────────────────────────────────
   if (config.OAUTH_ENABLED && !isLoopbackHost(config.HTTP_HOST)) {
     const missing: string[] = [];

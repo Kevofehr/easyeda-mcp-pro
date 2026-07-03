@@ -7,7 +7,7 @@ RUN corepack enable && corepack prepare pnpm@11.5.1 --activate
 WORKDIR /app
 
 # Copy root workspace and package manifests
-COPY .npmrc pnpm-workspace.yaml package.json pnpm-lock.yaml ./
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 COPY easyeda-bridge-extension/package.json ./easyeda-bridge-extension/
 
 # Install dependencies (including devDependencies for build)
@@ -24,7 +24,7 @@ RUN pnpm build
 RUN pnpm build:extension
 
 # Prune development dependencies to keep production image light
-RUN pnpm install --prod --ignore-scripts
+RUN CI=true pnpm install --prod --ignore-scripts
 
 # ── Production Runner Stage ────────────────────────────────────
 FROM node:24-alpine AS runner

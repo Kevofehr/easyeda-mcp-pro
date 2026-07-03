@@ -240,6 +240,7 @@ describe('validateSafeConfig', () => {
     TRANSPORT: 'http' as const,
     HTTP_HOST: '127.0.0.1',
     OAUTH_ENABLED: false,
+    HTTP_AUTH_DISABLED: false,
     OAUTH_JWKS_URI: '',
     OAUTH_ISSUER: '',
     OAUTH_AUDIENCE: 'easyeda-mcp-pro',
@@ -251,6 +252,27 @@ describe('validateSafeConfig', () => {
 
   it('should pass when OAuth is disabled', () => {
     expect(() => validateSafeConfig({ ...baseConfig, OAUTH_ENABLED: false })).not.toThrow();
+  });
+
+  it('should reject HTTP_AUTH_DISABLED in production even on loopback', () => {
+    expect(() =>
+      validateSafeConfig({
+        ...baseConfig,
+        NODE_ENV: 'production',
+        HTTP_AUTH_DISABLED: true,
+      }),
+    ).toThrow('process.exit called');
+  });
+
+  it('should reject HTTP_AUTH_DISABLED on non-loopback HTTP', () => {
+    expect(() =>
+      validateSafeConfig({
+        ...baseConfig,
+        HTTP_AUTH_DISABLED: true,
+        HTTP_HOST: '0.0.0.0',
+        ALLOWED_ORIGINS: 'https://example.com',
+      }),
+    ).toThrow('process.exit called');
   });
 
   it('should reject OAUTH_ENABLED without OAUTH_JWKS_URI', () => {

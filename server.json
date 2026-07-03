@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.oaslananka/easyeda-mcp-pro",
-  "description": "Production-grade MCP server for EasyEDA Pro: safe PCB design inspection, BOM sourcing, manufacturing export, and AI-assisted hardware review.",
+  "description": "MCP server for EasyEDA Pro: PCB inspection, BOM, exports, and hardware review.",
   "repository": {
     "url": "https://github.com/oaslananka/easyeda-mcp-pro",
     "source": "github"
   },
-  "version": "0.6.0",
+  "version": "0.7.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "easyeda-mcp-pro",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "transport": {
         "type": "stdio"
       },
@@ -105,6 +105,13 @@
         {
           "name": "MCP_V2_EXPERIMENTAL",
           "description": "Enable experimental MCP v2 features",
+          "isRequired": false,
+          "format": "boolean",
+          "default": "false"
+        },
+        {
+          "name": "MCP_RAW_EXEC_EXPERIMENTAL",
+          "description": "Enable experimental raw EasyEDA runtime execution gate (dangerous; requires BRIDGE_RAW_EXEC_ENABLED)",
           "isRequired": false,
           "format": "boolean",
           "default": "false"

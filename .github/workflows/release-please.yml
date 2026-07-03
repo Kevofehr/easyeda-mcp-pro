@@ -81,9 +81,20 @@ jobs:
       - name: Verify Quality Gates
         if: ${{ env.RELEASE_RUN == 'true' }}
         run: |
+          pnpm audit --audit-level low
+          pnpm peers check
+          pnpm format:check
           pnpm typecheck
           pnpm typecheck:extension
+          pnpm lint
+          pnpm lint:tools
+          pnpm verify:tool-coverage
           pnpm test
+          pnpm test:coverage
+          pnpm generate:tools-doc
+          git diff --exit-code docs/reference/tools.md
+          pnpm check:metadata
+          pnpm docs:build
 
       - name: Build Projects
         if: ${{ env.RELEASE_RUN == 'true' }}

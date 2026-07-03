@@ -6,15 +6,7 @@ import { execFile } from 'node:child_process';
 // ── Types ───────────────────────────────────────────────────
 
 export type ClientName =
-  | 'claude'
-  | 'cursor'
-  | 'vscode'
-  | 'windsurf'
-  | 'cline'
-  | 'gemini'
-  | 'zed'
-  | 'amazonq'
-  | 'continue';
+  'claude' | 'cursor' | 'vscode' | 'windsurf' | 'cline' | 'gemini' | 'zed' | 'amazonq' | 'continue';
 
 export type SetupAction = 'setup' | 'extension';
 

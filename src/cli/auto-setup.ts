@@ -5,6 +5,7 @@ import { stdin as input, stdout as output } from 'node:process';
 import { getLogger } from '../utils/logger.js';
 import {
   type ClientDefinition,
+  type ClientName,
   type SetupOptions,
   SERVER_NAME,
   NPX_COMMAND,
@@ -278,7 +279,7 @@ export async function runInteractiveInit(): Promise<void> {
     console.log('Step 1: Choose MCP Client to Configure');
     console.log('--------------------------------------');
     const detected = detectInstalledClients();
-    const clientOptions = [
+    const clientOptions: Array<{ name: ClientName; display: string }> = [
       { name: 'claude', display: 'Claude Desktop' },
       { name: 'cursor', display: 'Cursor IDE' },
       { name: 'vscode', display: 'VS Code (Copilot)' },
@@ -290,10 +291,9 @@ export async function runInteractiveInit(): Promise<void> {
       { name: 'continue', display: 'Continue.dev' },
     ];
 
-    for (let i = 0; i < clientOptions.length; i++) {
-      const opt = clientOptions[i]!;
+    for (const [index, opt] of clientOptions.entries()) {
       const isDet = detected.some((d) => d.name === opt.name);
-      console.log(`  ${i + 1}. ${opt.display}${isDet ? ' (Detected 🔵)' : ''}`);
+      console.log(`  ${index + 1}. ${opt.display}${isDet ? ' (Detected 🔵)' : ''}`);
     }
     console.log(`  ${clientOptions.length + 1}. Configure All Detected`);
     console.log();
@@ -310,7 +310,10 @@ export async function runInteractiveInit(): Promise<void> {
     }
 
     const selectedClient =
-      clientChoiceIndex === clientOptions.length ? 'all' : clientOptions[clientChoiceIndex]!.name;
+      clientChoiceIndex === clientOptions.length ? 'all' : clientOptions[clientChoiceIndex]?.name;
+    if (!selectedClient) {
+      throw new Error('Invalid client selection');
+    }
 
     console.log();
 
@@ -395,7 +398,7 @@ export async function runInteractiveInit(): Promise<void> {
     console.log();
 
     // Perform Client Setup
-    const setupResult = runSetup({ client: selectedClient as any, profile: profileChoice });
+    const setupResult = runSetup({ client: selectedClient, profile: profileChoice });
     console.log(setupResult);
 
     console.log();

@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.6.3](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.6.2...easyeda-mcp-pro-v0.6.3) (2026-06-30)
+
+
+### Bug Fixes
+
+* support EasyEDA v3 bridge handshake fallback ([deb86d9](https://github.com/oaslananka/easyeda-mcp-pro/commit/deb86d9055a967225bf16fa0896870d021f1587f))
+
+## [0.6.2](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.6.1...easyeda-mcp-pro-v0.6.2) (2026-06-30)
+
+
+### Bug Fixes
+
+* make Docker pnpm prune non-interactive ([cb68b3d](https://github.com/oaslananka/easyeda-mcp-pro/commit/cb68b3d9ef7121b871c41bdbd8c28c86a15deb40))
+* make Docker pnpm prune non-interactive ([6c13148](https://github.com/oaslananka/easyeda-mcp-pro/commit/6c13148b23d15d12e7b4cdadad596441715bf64e))
+
+## [0.6.1](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.6.0...easyeda-mcp-pro-v0.6.1) (2026-06-30)
+
+
+### Bug Fixes
+
+* repair Docker and MCP registry publishing ([3309e2a](https://github.com/oaslananka/easyeda-mcp-pro/commit/3309e2af6b13a30118a4c225f40a0be3a2c0ff13))
+* repair Docker and MCP registry publishing ([4c76d5b](https://github.com/oaslananka/easyeda-mcp-pro/commit/4c76d5b4bc5124a24c493188dc64c6e6d731c26d))
+
+## [0.6.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.5.3...easyeda-mcp-pro-v0.6.0) (2026-06-30)
+
+
+### Features
+
+* add live EasyEDA smoke harness ([ac01112](https://github.com/oaslananka/easyeda-mcp-pro/commit/ac01112e1c87e21cb36ad9f4759dd3e2329a6db4))
+* add project resources and review prompts ([4895c8c](https://github.com/oaslananka/easyeda-mcp-pro/commit/4895c8c46acea91f19e9d0706dc1e91d49c5bd78))
+* add runtime inventory diff tooling ([9827694](https://github.com/oaslananka/easyeda-mcp-pro/commit/982769455ee7fe63985907576402d8062d9ef319))
+* expand circuit ir domains and constraints ([301f3c8](https://github.com/oaslananka/easyeda-mcp-pro/commit/301f3c8890d3ea936b1b6002f13669998511beef))
+* expose bridge telemetry diagnostics ([1836ed4](https://github.com/oaslananka/easyeda-mcp-pro/commit/1836ed4941e8b0ca6d7de4335e5c851a4d9ffc41))
+* extend doctor command with environment metadata and tool profiles ([#39](https://github.com/oaslananka/easyeda-mcp-pro/issues/39)) ([291afb6](https://github.com/oaslananka/easyeda-mcp-pro/commit/291afb6b5fb51dcc1cade760bd55e9d4cf458717))
+* synthesize circuit intent planning context ([1ff30ea](https://github.com/oaslananka/easyeda-mcp-pro/commit/1ff30eab030484783215e1e5608657e611deb949))
+
+
+### Bug Fixes
+
+* add capability-scoped tool authorization ([e9b0f80](https://github.com/oaslananka/easyeda-mcp-pro/commit/e9b0f80c796529d867d77d277855be876e467b82))
+* add write transaction planning flow ([43b6735](https://github.com/oaslananka/easyeda-mcp-pro/commit/43b6735acb1a2c5edee7b1c6a74e7e5d712ca8d4))
+* align release metadata and tool profiles ([6f58f8c](https://github.com/oaslananka/easyeda-mcp-pro/commit/6f58f8c36a9b98da0f11715887df29f6ac45edf5))
+* **docker:** copy .npmrc into builder so confirmModulesPurge=false applies ([48d2890](https://github.com/oaslananka/easyeda-mcp-pro/commit/48d2890d0ce00deadf252614b7de3f01439d35e7))
+* harden http transport origin checks ([7423f77](https://github.com/oaslananka/easyeda-mcp-pro/commit/7423f77ebc7c9b02a0cd064d081bcbf96cb65bc6))
+* harden release gates and HTTP auth ([5ac4ecb](https://github.com/oaslananka/easyeda-mcp-pro/commit/5ac4ecb86ee54255ce95017c84977d83f3121f3d))
+* harden release gates and HTTP auth ([9234b63](https://github.com/oaslananka/easyeda-mcp-pro/commit/9234b63f5ef509d069f4dadc2ad559d0a3e9fd40))
+* quarantine raw execution tool ([1cd3f1b](https://github.com/oaslananka/easyeda-mcp-pro/commit/1cd3f1b0361761f9e980b50628d05dcc45d9037f))
+* validate tool output schemas ([30c4e4f](https://github.com/oaslananka/easyeda-mcp-pro/commit/30c4e4f6c305c8c40a05be66f8fe8c032a2431cd))
+* version bridge contract ([9ebdf47](https://github.com/oaslananka/easyeda-mcp-pro/commit/9ebdf47de07d419a2cebcd6e487a611c467f0a7f))
+
 ## [0.5.3](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.5.2...easyeda-mcp-pro-v0.5.3) (2026-06-14)
 
 

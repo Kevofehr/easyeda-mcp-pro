@@ -70,8 +70,7 @@ function checkSourceProject(input: ExportManifestInput): ExportManifestIssue[] {
   }
 
   // Check each artifact for source project
-  for (let i = 0; i < input.artifacts.length; i++) {
-    const artifact = input.artifacts[i]!;
+  for (const [i, artifact] of input.artifacts.entries()) {
     if (!artifact.sourceProject || artifact.sourceProject.trim().length === 0) {
       issues.push(
         manifestWarning(
@@ -111,8 +110,7 @@ function checkGeneratedTimestamps(input: ExportManifestInput): ExportManifestIss
   }
 
   // Check per-artifact timestamps
-  for (let i = 0; i < input.artifacts.length; i++) {
-    const artifact = input.artifacts[i]!;
+  for (const [i, artifact] of input.artifacts.entries()) {
     if (!artifact.timestamp || artifact.timestamp.trim().length === 0) {
       issues.push(
         manifestWarning(
@@ -136,8 +134,7 @@ function checkGeneratedTimestamps(input: ExportManifestInput): ExportManifestIss
 function checkMissingPurposes(input: ExportManifestInput): ExportManifestIssue[] {
   const issues: ExportManifestIssue[] = [];
 
-  for (let i = 0; i < input.artifacts.length; i++) {
-    const artifact = input.artifacts[i]!;
+  for (const [i, artifact] of input.artifacts.entries()) {
     if (!artifact.purpose || artifact.purpose.trim().length === 0) {
       issues.push(
         manifestWarning(
@@ -162,8 +159,7 @@ function checkMissingPurposes(input: ExportManifestInput): ExportManifestIssue[]
 function checkEmptyFiles(input: ExportManifestInput): ExportManifestIssue[] {
   const issues: ExportManifestIssue[] = [];
 
-  for (let i = 0; i < input.artifacts.length; i++) {
-    const artifact = input.artifacts[i]!;
+  for (const [i, artifact] of input.artifacts.entries()) {
     if (artifact.fileSize !== undefined && artifact.fileSize === 0) {
       issues.push(
         manifestError(
@@ -190,8 +186,7 @@ function checkEmptyFiles(input: ExportManifestInput): ExportManifestIssue[] {
 function checkStaleFiles(input: ExportManifestInput): ExportManifestIssue[] {
   const issues: ExportManifestIssue[] = [];
 
-  for (let i = 0; i < input.artifacts.length; i++) {
-    const artifact = input.artifacts[i]!;
+  for (const [i, artifact] of input.artifacts.entries()) {
     if (artifact.stale) {
       issues.push(
         manifestWarning(
@@ -218,8 +213,7 @@ function checkStaleFiles(input: ExportManifestInput): ExportManifestIssue[] {
 function checkChecksumMismatches(input: ExportManifestInput): ExportManifestIssue[] {
   const issues: ExportManifestIssue[] = [];
 
-  for (let i = 0; i < input.artifacts.length; i++) {
-    const artifact = input.artifacts[i]!;
+  for (const [i, artifact] of input.artifacts.entries()) {
     if (
       artifact.checksum !== undefined &&
       artifact.checksum !== null &&
@@ -263,8 +257,7 @@ function checkMissingRequiredFiles(input: ExportManifestInput): ExportManifestIs
 
   const exportedNames = new Set(input.artifacts.map((a) => a.filename));
 
-  for (let i = 0; i < input.expectedArtifacts.length; i++) {
-    const expected = input.expectedArtifacts[i]!;
+  for (const [i, expected] of input.expectedArtifacts.entries()) {
     const isRequired = expected.required ?? true; // default to required
     if (isRequired && !exportedNames.has(expected.filename)) {
       issues.push(
@@ -299,8 +292,7 @@ function checkUnexpectedFiles(input: ExportManifestInput): ExportManifestIssue[]
 
   const expectedNames = new Set(input.expectedArtifacts.map((a) => a.filename));
 
-  for (let i = 0; i < input.artifacts.length; i++) {
-    const artifact = input.artifacts[i]!;
+  for (const [i, artifact] of input.artifacts.entries()) {
     if (!expectedNames.has(artifact.filename)) {
       issues.push(
         manifestWarning(
@@ -337,8 +329,7 @@ function checkWrongFileTypes(input: ExportManifestInput): ExportManifestIssue[] 
     expectedTypeByFile.set(expected.filename, expected.fileType);
   }
 
-  for (let i = 0; i < input.artifacts.length; i++) {
-    const artifact = input.artifacts[i]!;
+  for (const [i, artifact] of input.artifacts.entries()) {
     const expectedType = expectedTypeByFile.get(artifact.filename);
     if (expectedType && artifact.fileType !== expectedType) {
       issues.push(
