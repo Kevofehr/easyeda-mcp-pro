@@ -341,21 +341,6 @@ function pcbId(result: unknown, prefix: string): { primitiveId: string } {
   return { primitiveId: id || `${prefix}_${Date.now()}` };
 }
 
-// Throw a clear bridge error if any provided coordinate/size is non-finite (e.g.
-// NaN from a missing field), so we never author garbage geometry that then
-// silently "succeeds".
-function assertFinite(context: string, values: Record<string, unknown>): void {
-  for (const [key, value] of Object.entries(values)) {
-    if (typeof value !== 'number' || !Number.isFinite(value)) {
-      throw newBridgeError(
-        'INVALID_GEOMETRY',
-        `${context}: '${key}' is not a finite number (got ${String(value)}).`,
-        'Provide every coordinate/size field required for this shape.',
-      );
-    }
-  }
-}
-
 // Build an EasyEDA TPCB_PolygonSourceArray from a shape descriptor. Grammar (per
 // the official typings): polygon = [x1,y1,'L',x2,y2,...]; rect = ['R',x,y,w,h,rot,round];
 // circle = ['CIRCLE',cx,cy,r]. A single polygon auto-closes. Throws on a
@@ -1893,81 +1878,26 @@ async function dispatch(method: string, params: Record<string, unknown> = {}): P
       return pcbId(znRes, 'pour');
     }
     case 'pcb.addBoardOutline': {
-      // Board frame = geometry on layer 11 (BOARD_OUTLINE). rect/polygon draw
-      // per-segment lines; circle draws two 180° arcs (a single 360° arc with
-      // start==end is geometrically singular).
+      // Board frame = a single PCB_PrimitivePolyline on layer 11 (BOARD_OUTLINE) —
+      // the canonical representation (EasyEDA's own default board outline is
+      // exactly a CIRCLE/rect polyline on layer 11). Handles circle/rect/polygon
+      // uniformly via the shared polygon builder, which validates finite coords
+      // and minimum points.
+      //
+      // IMPORTANT: PCB_PrimitiveArc.create returns an id but does NOT register in
+      // EasyEDA Pro's current build (verified live 2026-07-03) — the outline is
+      // authored as a polyline, never as arcs.
       const boWidth = Number(params.lineWidth ?? 0.2);
       const boShape = String(params.shape ?? 'rect');
-      const boIds: string[] = [];
-      if (boShape === 'circle') {
-        const cx = Number(params.cx);
-        const cy = Number(params.cy);
-        const r = Number(params.radius);
-        assertFinite('board outline circle', { cx, cy, radius: r });
-        // Two 180° semicircle arcs between diametrically opposite points so both
-        // endpoints are distinct and each semicircle radius is well-defined.
-        const semis: Array<[number, number, number, number]> = [
-          [cx - r, cy, cx + r, cy],
-          [cx + r, cy, cx - r, cy],
-        ];
-        for (const [sx, sy, ex, ey] of semis) {
-          const arc = await callFirst(
-            ['PCB_PrimitiveArc.create', 'pcb_PrimitiveArc.create'],
-            '',
-            PCB_LAYER.BOARD_OUTLINE,
-            sx,
-            sy,
-            ex,
-            ey,
-            180,
-            boWidth,
-          );
-          boIds.push(pcbId(arc, 'outline').primitiveId);
-        }
-      } else {
-        let pts =
-          boShape === 'polygon'
-            ? toXYPairs(params.points)
-            : (() => {
-                const x = Number(params.x);
-                const y = Number(params.y);
-                const w = Number(params.width);
-                const h = Number(params.height);
-                return [
-                  [x, y],
-                  [x + w, y],
-                  [x + w, y + h],
-                  [x, y + h],
-                ] as Array<[number, number]>;
-              })();
-        if (boShape === 'polygon' && pts.length < 3) {
-          throw newBridgeError(
-            'INVALID_GEOMETRY',
-            `board outline polygon needs at least 3 points (got ${pts.length}).`,
-            'Pass a points array describing the board frame.',
-          );
-        }
-        for (const [px, py] of pts) assertFinite(`board outline ${boShape}`, { x: px, y: py });
-        if (pts.length > 1) {
-          const first = pts[0];
-          const last = pts[pts.length - 1];
-          if (first[0] !== last[0] || first[1] !== last[1]) pts = [...pts, first];
-        }
-        for (let i = 0; i + 1 < pts.length; i++) {
-          const seg = await callFirst(
-            ['PCB_PrimitiveLine.create', 'pcb_PrimitiveLine.create'],
-            '',
-            PCB_LAYER.BOARD_OUTLINE,
-            pts[i][0],
-            pts[i][1],
-            pts[i + 1][0],
-            pts[i + 1][1],
-            boWidth,
-          );
-          boIds.push(pcbId(seg, 'outline').primitiveId);
-        }
-      }
-      return { primitiveId: boIds[0] ?? `outline_${Date.now()}`, segmentIds: boIds };
+      const boPolygon = await buildPolygon(boShape, params);
+      const boRes = await callFirst(
+        ['PCB_PrimitivePolyline.create', 'pcb_PrimitivePolyline.create'],
+        '',
+        PCB_LAYER.BOARD_OUTLINE,
+        boPolygon,
+        boWidth,
+      );
+      return pcbId(boRes, 'outline');
     }
     case 'pcb.addPad': {
       // PCB_PrimitivePad.create(layer, padNumber, x, y, rotation, padShape, net, hole, ...)
@@ -2298,7 +2228,7 @@ function buildHandshake(): Record<string, unknown> {
     protocolVersion: BRIDGE_VERSION,
     contractVersion: BRIDGE_CONTRACT_VERSION,
     clientName: 'easyeda-mcp-pro',
-    extensionVersion: '0.7.1', // x-release-please-version
+    extensionVersion: '0.7.2', // x-release-please-version
     easyedaVersion: getEasyedaVersion(),
     devMode: false,
   };
