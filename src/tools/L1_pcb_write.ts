@@ -54,6 +54,39 @@ function flattenPoints(points: Array<{ x: number; y: number }> | undefined): num
   return points ? points.flatMap((pt) => [pt.x, pt.y]) : undefined;
 }
 
+// EPCB_LayerId values printed on the underside of the board. When the board is
+// flipped to the bottom view it is mirrored across the vertical (Y) axis, which
+// reflects any rotation. (bottom copper=2, silk=4, mask=6, paste=8, assembly=10,
+// stiffener=59.)
+const BOTTOM_SIDE_LAYERS = new Set([2, 4, 6, 8, 10, 59]);
+
+// Normalize an angle to [0, 360) — EasyEDA rotations are positive-only.
+function normalizeAngle(a: number): number {
+  return ((a % 360) + 360) % 360;
+}
+
+// Resolve the stored rotation for a silkscreen/text primitive given the frame
+// the rotation was authored in.
+//   frame "stored"       -> rotation used verbatim (default; backward-compatible).
+//   frame "bottom-view"  -> the rotation was computed in the top-plane reading
+//                           frame; reflect it (360 - r, normalized) so the text
+//                           reads correctly once the board is flipped to view
+//                           the bottom. Applies ONLY to bottom-side layers; on a
+//                           top-side layer it is a no-op (the value is returned
+//                           unchanged, so an accidental frame flag can't silently
+//                           corrupt top silk).
+// See docs/reference/pcb-authoring-gotchas.md.
+export function resolveSilkscreenRotation(
+  rotation: number,
+  layer: number,
+  frame: 'stored' | 'bottom-view',
+): number {
+  if (frame === 'bottom-view' && BOTTOM_SIDE_LAYERS.has(layer)) {
+    return normalizeAngle(360 - rotation);
+  }
+  return rotation;
+}
+
 const layoutPointSchema = z.object({ x: z.number(), y: z.number() });
 const layoutBoardSchema = z.object({
   widthMm: z.number().positive(),
@@ -855,13 +888,13 @@ function registerPcbWriteTools(
     name: 'easyeda_pcb_add_silkscreen_text',
     title: 'Add silkscreen text',
     description:
-      'Place silkscreen (or document-layer) text via PCB_PrimitiveString.create. layer 3=top silk, 4=bottom silk, 13=document. alignMode 1..9 (5=center). fontFamily must already be imported into EasyEDA.',
+      'Place silkscreen/document-layer text via PCB_PrimitiveString.create (a controlled write). layer 3=top silk, 4=bottom silk, 13=document. alignMode 1..9 (5=center). fontFamily must be pre-imported. Use frame="bottom-view" for bottom-layer text whose rotation was computed in the top-plane frame.',
     profile: 'full',
     evidence: ['official-docs'],
     risk: 'high',
     confirmWrite: true,
     group: 'pcb-write',
-    version: '1.0.0',
+    version: '1.1.0',
     annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: z.object({
       x: z.number(),
@@ -873,6 +906,12 @@ function registerPcbWriteTools(
       lineWidth: z.number().default(0.15),
       alignMode: z.number().default(5),
       rotation: z.number().default(0),
+      frame: z
+        .enum(['stored', 'bottom-view'])
+        .default('stored')
+        .describe(
+          'Rotation frame. "stored" (default): use rotation verbatim. "bottom-view": reflect the rotation (360-r, normalized to 0..360) so text authored in the top-plane frame reads correctly on the flipped bottom view. Applies only to bottom-side layers (2/4/6/8/10/59); no-op on top-side layers.',
+        ),
       reverse: z.boolean().default(false),
       expansion: z.number().default(0),
       mirror: z.boolean().default(false),
@@ -881,6 +920,11 @@ function registerPcbWriteTools(
     outputSchema: pcbWriteOutputSchema,
     handler: async (ctx: ToolContext, params: unknown) => {
       const p = params as Record<string, unknown>;
+      const rotation = resolveSilkscreenRotation(
+        p.rotation as number,
+        p.layer as number,
+        p.frame as 'stored' | 'bottom-view',
+      );
       return bridgeWrite(ctx, 'pcb.addSilkText', {
         x: p.x,
         y: p.y,
@@ -890,7 +934,7 @@ function registerPcbWriteTools(
         fontSize: p.fontSize,
         lineWidth: p.lineWidth,
         alignMode: p.alignMode,
-        rotation: p.rotation,
+        rotation,
         reverse: p.reverse,
         expansion: p.expansion,
         mirror: p.mirror,
@@ -990,7 +1034,7 @@ function registerPcbWriteTools(
     name: 'easyeda_pcb_import_project_file',
     title: 'Import external board file into EasyEDA project',
     description:
-      'Headlessly import a KiCad/Altium/EAGLE/OrCAD/PADS/LTspice project file into the current or an existing EasyEDA Pro project via SYS_FileManager.importProjectByProjectFile. Desktop client only; needs the extension external-interaction permission. filePath must be an absolute local path (a KiCad archive .zip is preferred for fileType "KiCad").',
+      'Import (writes into the project) a KiCad/Altium/EAGLE/OrCAD/PADS/LTspice file into the current or existing EasyEDA Pro project via SYS_FileManager.importProjectByProjectFile. Desktop client only; needs external-interaction permission. filePath = absolute local path (KiCad .zip preferred for fileType "KiCad").',
     profile: 'full',
     evidence: ['official-docs'],
     risk: 'high',
@@ -1040,7 +1084,7 @@ function registerPcbWriteTools(
     name: 'easyeda_pcb_import_ses_route',
     title: 'Import Freerouting SES route',
     description:
-      'Apply a Specctra SES (autorouter session) file onto the OPEN PCB via PCB_Document.importAutoRouteSesFile — the Freerouting round-trip. The board must already have components, nets, and outline. filePath must be absolute.',
+      'Apply a Specctra SES (autorouter session) file — writes the routes onto the OPEN PCB via PCB_Document.importAutoRouteSesFile — the Freerouting round-trip. The board must already have components, nets, and outline. filePath must be absolute.',
     profile: 'full',
     evidence: ['official-docs'],
     risk: 'high',
@@ -1068,7 +1112,7 @@ function registerPcbWriteTools(
     name: 'easyeda_pcb_import_tscircuit_board',
     title: 'Build a tscircuit board and import it into EasyEDA',
     description:
-      'The whole-board fallback: exports a tscircuit board to a patched KiCad archive (runs scripts/patch-kicad-cutouts.js = tsci export -f kicad_zip + cutout/soldermask patch), then imports it into the EasyEDA project via the bridge. Runs on the desktop client with the external-interaction permission. Set skipBuild=true to import a pre-built zip.',
+      'Whole-board fallback: exports a tscircuit board to a patched KiCad archive (scripts/patch-kicad-cutouts.js = tsci export -f kicad_zip + cutout/soldermask patch), then imports it into the EasyEDA project via the bridge. Desktop client + external-interaction permission. skipBuild=true imports a pre-built zip.',
     profile: 'full',
     evidence: ['inferred'],
     risk: 'high',
