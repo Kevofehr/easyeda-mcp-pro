@@ -150,7 +150,7 @@ async function applyLayoutOperations(
 
 function registerPcbWriteTools(
   registry: { register: (def: ToolDefinition) => void },
-  _config: EnvConfig,
+  config: EnvConfig,
 ) {
   registry.register({
     name: 'easyeda_pcb_place_component_group',
@@ -1112,17 +1112,20 @@ function registerPcbWriteTools(
     name: 'easyeda_pcb_import_tscircuit_board',
     title: 'Build a tscircuit board and import it into EasyEDA',
     description:
-      'Whole-board fallback: exports a tscircuit board to a patched KiCad archive (scripts/patch-kicad-cutouts.js = tsci export -f kicad_zip + cutout/soldermask patch), then imports it into the EasyEDA project via the bridge. Desktop client + external-interaction permission. skipBuild=true imports a pre-built zip.',
+      'Whole-board fallback: builds a tscircuit board to a KiCad archive, then imports it into EasyEDA via the bridge. skipBuild=true imports a pre-built zip. The build path (skipBuild=false) spawns a local Node process, so it requires BRIDGE_RAW_EXEC_ENABLED=true and MCP_RAW_EXEC_EXPERIMENTAL=true.',
     profile: 'full',
     evidence: ['inferred'],
     risk: 'high',
     confirmWrite: true,
     group: 'pcb-write',
-    version: '1.0.0',
+    version: '1.1.0',
     annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: z.object({
       board: z.enum(['top', 'middle', 'bottom']),
-      tscircuitDir: z.string().default('TSCIRCUIT_PROJECT_DIR'),
+      // Absolute path to the tscircuit project dir. Required only when building
+      // (skipBuild=false). No default: a hardcoded local path must never ship.
+      tscircuitDir: z.string().optional(),
+      buildScript: z.string().default('scripts/patch-kicad-cutouts.js'),
       existingProjectUuid: z.string().optional(),
       zipPath: z.string().optional(),
       skipBuild: z.boolean().default(false),
@@ -1138,7 +1141,8 @@ function registerPcbWriteTools(
     handler: async (ctx: ToolContext, params: unknown) => {
       const p = params as {
         board: 'top' | 'middle' | 'bottom';
-        tscircuitDir: string;
+        tscircuitDir?: string;
+        buildScript?: string;
         existingProjectUuid?: string;
         zipPath?: string;
         skipBuild?: boolean;
@@ -1147,12 +1151,32 @@ function registerPcbWriteTools(
         p.zipPath ?? path.join(os.homedir(), 'Downloads', 'Maker Chip', `${p.board}.kicad.zip`);
       let buildLog: string | undefined;
       if (!p.skipBuild) {
+        // The build path spawns a local Node process from a caller-supplied
+        // directory. Gate it behind the same raw-exec flags as easyeda_execute
+        // so an untrusted client cannot use it as an arbitrary-code-exec channel.
+        if (!config.BRIDGE_RAW_EXEC_ENABLED || !config.MCP_RAW_EXEC_EXPERIMENTAL) {
+          return {
+            success: false,
+            zipPath,
+            error:
+              'The tscircuit build path spawns a local process and is disabled. Set BRIDGE_RAW_EXEC_ENABLED=true and MCP_RAW_EXEC_EXPERIMENTAL=true to enable it, or pass skipBuild=true with a pre-built zipPath.',
+          };
+        }
+        if (!p.tscircuitDir || !path.isAbsolute(p.tscircuitDir)) {
+          return {
+            success: false,
+            zipPath,
+            error:
+              'tscircuitDir must be an absolute path to the tscircuit project when skipBuild=false.',
+          };
+        }
+        const buildScript = p.buildScript ?? 'scripts/patch-kicad-cutouts.js';
         try {
-          const { stdout, stderr } = await execFileAsync(
-            'node',
-            ['scripts/patch-kicad-cutouts.js', p.board],
-            { cwd: p.tscircuitDir, timeout: 300_000, maxBuffer: 32 * 1024 * 1024 },
-          );
+          const { stdout, stderr } = await execFileAsync('node', [buildScript, p.board], {
+            cwd: p.tscircuitDir,
+            timeout: 300_000,
+            maxBuffer: 32 * 1024 * 1024,
+          });
           buildLog = `${stdout}\n${stderr}`.trim();
         } catch (err) {
           const e = err as { stdout?: string; stderr?: string; message?: string };

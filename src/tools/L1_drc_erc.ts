@@ -92,7 +92,8 @@ function registerDrcErcTools(
           error_count: data.errorCount ?? violations.filter((v) => v.severity === 'error').length,
           warning_count:
             data.warningCount ?? violations.filter((v) => v.severity === 'warning').length,
-          passed: (data.errorCount ?? 0) === 0,
+          passed:
+            (data.errorCount ?? violations.filter((v) => v.severity === 'error').length) === 0,
         };
       } catch (err) {
         return {
@@ -188,7 +189,8 @@ function registerDrcErcTools(
           error_count: data.errorCount ?? violations.filter((v) => v.severity === 'error').length,
           warning_count:
             data.warningCount ?? violations.filter((v) => v.severity === 'warning').length,
-          passed: (data.errorCount ?? 0) === 0,
+          passed:
+            (data.errorCount ?? violations.filter((v) => v.severity === 'error').length) === 0,
         };
       } catch (err) {
         return {

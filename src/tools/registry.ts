@@ -1,6 +1,7 @@
 import { type McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { type ToolDefinition, type ToolContext } from './types.js';
 import {
+  registeredInputSchema,
   registeredOutputSchema,
   getRawInput,
   parseWriteMode,
@@ -192,7 +193,7 @@ export class ToolRegistry {
         {
           title: tool.title,
           description: tool.description,
-          inputSchema: tool.inputSchema,
+          inputSchema: registeredInputSchema(tool),
           outputSchema: registeredOutputSchema(tool),
           annotations: tool.annotations,
         },

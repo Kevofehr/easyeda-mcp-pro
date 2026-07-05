@@ -95,6 +95,25 @@ export function writePlanResponse(
   };
 }
 
+export function registeredInputSchema(tool: ToolDefinition): z.ZodType {
+  if (!tool.confirmWrite) return tool.inputSchema;
+  // Only object schemas can carry the write-control fields. All confirmWrite
+  // tools use z.object today; guard anyway so a non-object schema is left as-is.
+  if (!(tool.inputSchema instanceof z.ZodObject)) return tool.inputSchema;
+  // The MCP SDK validates the tool arguments against the REGISTERED input schema
+  // and strips any key the schema does not declare BEFORE the registry wrapper
+  // runs. writeMode is not part of any tool's own inputSchema, so without adding
+  // it here it is silently dropped and every writeMode="plan"/"preview" call
+  // falls through to a real apply (a "dry run" that mutates the design). Declare
+  // it on the registered schema so plan/preview are honored. confirmWrite is
+  // relaxed to optional here so a dry run does not require it; the registry
+  // wrapper still enforces confirmWrite===true for the apply path.
+  return (tool.inputSchema as z.ZodObject<z.ZodRawShape>).extend({
+    confirmWrite: z.literal(true).optional(),
+    writeMode: writeModeSchema.optional(),
+  });
+}
+
 export function registeredOutputSchema(tool: ToolDefinition): z.ZodType {
   if (!tool.confirmWrite) return tool.outputSchema;
   // A confirmWrite tool can return either its normal output (apply mode) or a
