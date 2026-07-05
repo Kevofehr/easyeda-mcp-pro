@@ -40,3 +40,5 @@ easyeda-bridge-extension.checksums.json
 *.p12
 *.pfx
 secrets/
+# Local-only internal review (contains security findings; never push)
+REVIEW.md
