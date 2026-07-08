@@ -116,6 +116,7 @@ describe('registerProjectResourcesAndPrompts', () => {
       'project_netlist',
       'project_bom',
       'project_review_workflow',
+      'style_guide',
     ]);
     expect(prompts.map((prompt) => prompt.name)).toEqual([
       'review_schematic',
@@ -167,6 +168,22 @@ describe('registerProjectResourcesAndPrompts', () => {
     });
     expect(payload.project_id).toBe('demo');
     expect(payload.total_entries).toBe(1);
+  });
+
+  it('should serve the style guide markdown from disk', async () => {
+    const { server, resources } = createMockServer();
+    registerProjectResourcesAndPrompts(asMcpServer(server), createMockContext());
+
+    const resource = requireResource(resources, 'style_guide');
+    const result = (await resource.callback(new URL('easyeda://guide/style'), {}, {})) as {
+      contents: Array<{ text: string; mimeType?: string }>;
+    };
+    const text = firstTextContent(result);
+
+    // Reads the real docs/reference/schematic-pcb-style-guide.md file.
+    expect(text).toContain('Schematic & PCB Style Guide');
+    expect(text).toContain('Correction log');
+    expect(result.contents[0]?.mimeType).toBe('text/markdown');
   });
 
   it('should create prompts that point agents to the registered resources', () => {

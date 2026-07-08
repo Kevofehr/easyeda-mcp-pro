@@ -1,6 +1,38 @@
 import { ResourceTemplate, type McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 import { type ToolContext } from '../tools/types.js';
+
+// The living style guide is served straight from the repo markdown file so a user
+// (or the agent) can edit it and have the change take effect with no rebuild.
+// dist/server/resources-prompts.js and src/server/resources-prompts.ts both sit
+// two levels under the package root, so ../../docs resolves the same either way.
+const STYLE_GUIDE_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '../../docs/reference/schematic-pcb-style-guide.md',
+);
+
+async function readStyleGuide(uri: URL) {
+  try {
+    const text = await readFile(STYLE_GUIDE_PATH, 'utf8');
+    return textResource(uri, text);
+  } catch (error) {
+    return textResource(
+      uri,
+      [
+        '# Schematic & PCB Style Guide',
+        '',
+        `Could not read the style guide at ${STYLE_GUIDE_PATH}.`,
+        `Reason: ${error instanceof Error ? error.message : String(error)}`,
+        '',
+        'Create docs/reference/schematic-pcb-style-guide.md (or run the server from',
+        'the repo root so the docs directory is reachable).',
+      ].join('\n'),
+    );
+  }
+}
 
 interface BridgeNet {
   netName?: string;
@@ -102,6 +134,7 @@ function reviewWorkflowText(): string {
     '',
     'Use this workflow before applying schematic, PCB, BOM, or export changes.',
     '',
+    '0. Read the house style guide resource (easyeda://guide/style) and follow it when authoring or reviewing schematics/PCBs. After any correction, record the new rule back into that guide.',
     '1. Read the project netlist resource and identify floating nets, duplicate labels, and suspicious one-node nets.',
     '2. Read the BOM resource and check missing LCSC numbers, missing footprints, quantity anomalies, and lifecycle risks.',
     '3. Run read-only ERC/DRC and board inspection tools before any write tool.',
@@ -120,6 +153,7 @@ function promptText(title: string, projectId: string, body: string): string {
     `- easyeda://project/${projectId}/netlist`,
     `- easyeda://project/${projectId}/bom`,
     '- easyeda://workflow/project-review',
+    '- easyeda://guide/style',
     '',
     body,
   ].join('\n');
@@ -161,6 +195,18 @@ export function registerProjectResourcesAndPrompts(server: McpServer, context: T
       mimeType: 'text/markdown',
     },
     async (uri) => textResource(uri, reviewWorkflowText()),
+  );
+
+  server.registerResource(
+    'style_guide',
+    'easyeda://guide/style',
+    {
+      title: 'Schematic & PCB style guide',
+      description:
+        'House style for clean schematics and PCBs. Living document - read before authoring, and append any correction so it is not repeated. Served live from docs/reference/schematic-pcb-style-guide.md.',
+      mimeType: 'text/markdown',
+    },
+    async (uri) => readStyleGuide(uri),
   );
 
   server.registerPrompt(

@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased (fork: Kevofehr/easyeda-mcp-pro)
+
+### Bug Fixes
+
+- Server crash on startup (`-32000 Connection closed`) at profiles that register a
+  write tool with a refined input schema (e.g. `easyeda_pcb_add_solid_region`'s
+  `.superRefine`). Under zod v4, `registeredInputSchema()` overwrote the
+  `confirmWrite` key via `ZodObject.extend()`, which throws on refined schemas.
+  Use `.safeExtend()` when available (preserves the refinement); falls back to
+  `.extend()` on older zod. Added a regression test.
+
+### Features
+
+- Headless multi-tab orchestration (single agent, full tab access). New editor
+  tools: `easyeda_project_documents`, `easyeda_editor_list_tabs`,
+  `easyeda_editor_open`, `easyeda_editor_activate`, `easyeda_editor_close`,
+  `easyeda_editor_screenshot`, `easyeda_editor_focus_document`. New bridge methods
+  wrap `dmt_EditorControl` / `dmt_Project` (`project.getInfo`, `editor.*`).
+- Document targeting on writes: every write tool accepts an optional `document`
+  ({ tabId | uuid | name }); the server focuses that tab before applying. All
+  writes run serialized behind a single-active-document focus-lock so edits never
+  interleave. Retrofit is centralized in the registry (no per-tool changes).
+- Screenshot tool returns a viewable MCP image content block.
+- Registered the previously-missing `system.inspectWires` bridge method.
+- Living schematic/PCB style guide (`docs/reference/schematic-pcb-style-guide.md`)
+  served as MCP resource `easyeda://guide/style` (read live from disk). The agent
+  is directed to it from the review workflow and review prompts; correction-log
+  and per-section placeholders let it improve every project.
+
+Multi-instance parallelism is intentionally out of scope for now.
+
 ## [0.6.3](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.6.2...easyeda-mcp-pro-v0.6.3) (2026-06-30)
 
 
