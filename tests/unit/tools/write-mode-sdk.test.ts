@@ -96,6 +96,46 @@ describe('writeMode through the real MCP SDK', () => {
     expect(res.structuredContent).toMatchObject({ ok: true, written: true });
   });
 
+  it('registers a write tool whose inputSchema has a refinement (zod v4 safeExtend)', async () => {
+    // Regression: registeredInputSchema() overwrites the confirmWrite key, which
+    // zod v4 ZodObject.extend() forbids on a schema carrying a .superRefine().
+    // That threw at registration and crashed the whole server on startup
+    // (-32000 Connection closed) at any profile registering such a tool.
+    const handler = vi.fn(async () => ({ ok: true, written: true }));
+    const refinedTool = {
+      name: 'test_refined_write',
+      title: 'refined write',
+      description: 'mutating test tool with a superRefine',
+      profile: 'core' as const,
+      evidence: ['inferred'] as const,
+      risk: 'high' as const,
+      confirmWrite: true,
+      group: 'pcb-write',
+      version: '1.0.0',
+      annotations: { readOnlyHint: false, destructiveHint: true },
+      inputSchema: z
+        .object({ shape: z.enum(['rect', 'circle']), radius: z.number().optional(), confirmWrite: z.literal(true) })
+        .superRefine((val, ctx) => {
+          if (val.shape === 'circle' && val.radius === undefined) {
+            ctx.addIssue({ code: 'custom', message: 'circle requires radius', path: ['radius'] });
+          }
+        }),
+      outputSchema: z.object({ ok: z.boolean(), written: z.boolean() }),
+      handler,
+    };
+
+    // The crash was at registration time; reaching a connected client proves it registered.
+    const { client } = await connectedClient((registry) => {
+      registry.register(refinedTool);
+    });
+    const res = await client.callTool({
+      name: 'test_refined_write',
+      arguments: { shape: 'rect', confirmWrite: true },
+    });
+    expect(res.isError).toBeFalsy();
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
   it('apply without confirmWrite is rejected and never runs the handler', async () => {
     const handler = vi.fn(async () => ({ ok: true, written: true }));
     const { client } = await connectedClient((registry, _ctx) => {

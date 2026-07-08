@@ -9,6 +9,7 @@ import {
   writePlanResponse,
 } from './transaction.js';
 import { type ToolProfile, getEnabledProfiles } from '../config/profiles.js';
+import { withActiveDocument, isEmptyTarget, documentTargetSchema } from './focus-lock.js';
 import { ZodError, type z } from 'zod';
 import { SERVER_VERSION } from '../config/version.js';
 
@@ -253,7 +254,18 @@ export class ToolRegistry {
 
             // ── Parse & execute ───────────────────────────────────────
             const parsed = tool.inputSchema.parse(input ?? {});
-            const result = await tool.handler(context, parsed);
+            // Headless targeting + write serialization (focus-lock): any tool given
+            // an explicit `document`, and every write tool (even untargeted), runs
+            // under the single-active-document lock so edits never interleave and a
+            // targeted edit auto-focuses its tab first. Reads without a target run
+            // directly (unlocked, concurrent).
+            const targetParse = documentTargetSchema.safeParse(raw.document);
+            const target = targetParse.success ? targetParse.data : undefined;
+            const runHandler = () => tool.handler(context, parsed);
+            const result =
+              tool.confirmWrite || !isEmptyTarget(target)
+                ? await withActiveDocument(context, target, runHandler)
+                : await runHandler();
             const output = tool.outputSchema.safeParse(result);
 
             if (!output.success) {
@@ -268,6 +280,28 @@ export class ToolRegistry {
               typeof output.data === 'object' && output.data !== null
                 ? (output.data as Record<string, unknown>)
                 : { value: output.data };
+
+            // Image convention: if a tool output carries `imageBase64` + `mime`,
+            // surface it as a viewable MCP image content block (e.g. the editor
+            // screenshot tool) and omit the base64 from the duplicated text JSON
+            // so a large blob is not paid for twice.
+            const imageBase64 = structuredContent.imageBase64;
+            const imageMime = structuredContent.mime;
+            if (typeof imageBase64 === 'string' && imageBase64.length > 0) {
+              const { imageBase64: _omitted, ...textShape } = structuredContent;
+              return {
+                structuredContent,
+                content: [
+                  {
+                    type: 'image' as const,
+                    data: imageBase64,
+                    mimeType: typeof imageMime === 'string' ? imageMime : 'image/png',
+                  },
+                  { type: 'text' as const, text: JSON.stringify(textShape, null, 2) },
+                ],
+              };
+            }
+
             return {
               structuredContent,
               content: [{ type: 'text' as const, text: JSON.stringify(output.data, null, 2) }],

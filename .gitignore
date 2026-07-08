@@ -42,3 +42,5 @@ easyeda-bridge-extension.checksums.json
 secrets/
 # Local-only internal review (contains security findings; never push)
 REVIEW.md
+# Local-only internal planning/roadmap doc; never push
+docs/reference/headless-multitab-plan.md

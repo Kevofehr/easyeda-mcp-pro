@@ -462,6 +462,7 @@ describe('ToolRegistry', () => {
         // group must be a known value
         expect([
           'diagnostics',
+          'editor',
           'schematic',
           'bom',
           'drc-erc',

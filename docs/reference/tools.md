@@ -5,78 +5,85 @@ These tools are profile-gated. Set the `TOOL_PROFILE` environment variable to en
 
 ## Summary of Tools
 
-| Tool Name                               | Profile | Risk     | Description                                                                                                                                                                                                                                                                                                            |
-| --------------------------------------- | ------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `easyeda_api_call`                      | `full`  | `high`   | Controlled call to a documented EasyEDA class method by path, for example SCH_PrimitiveWire.getAll. This is not raw JavaScript execution.                                                                                                                                                                              |
-| `easyeda_api_inventory`                 | `core`  | `low`    | Inspect the live EasyEDA extension runtime and list available documented API classes, runtime paths, and methods.                                                                                                                                                                                                      |
-| `easyeda_board_dimensions`              | `core`  | `low`    | Get the PCB board outline dimensions, shape, and mounting hole information.                                                                                                                                                                                                                                            |
-| `easyeda_board_features`                | `core`  | `low`    | Get counts of board features including vias, tracks, copper zones, and pads.                                                                                                                                                                                                                                           |
-| `easyeda_board_layers`                  | `core`  | `low`    | List all layers in the PCB design including signal, power, plane, and mechanical layers.                                                                                                                                                                                                                               |
-| `easyeda_board_stackup`                 | `core`  | `low`    | Get the PCB layer stackup including thickness, material, and dielectric constants.                                                                                                                                                                                                                                     |
-| `easyeda_bom_export`                    | `core`  | `low`    | Export the bill of materials to a file on disk in the specified format.                                                                                                                                                                                                                                                |
-| `easyeda_bom_generate`                  | `core`  | `low`    | Generate a bill of materials for the project with grouping and formatting options.                                                                                                                                                                                                                                     |
-| `easyeda_bom_quality_report`            | `core`  | `medium` | Generate a BOM quality report that identifies unavailable, single-source, missing-MPN, missing-footprint, and low-stock items across configured suppliers.                                                                                                                                                             |
-| `easyeda_bom_sourcing`                  | `core`  | `medium` | Retrieve pricing and availability information for all parts in the project BOM from specified suppliers.                                                                                                                                                                                                               |
-| `easyeda_bom_validate`                  | `core`  | `medium` | Validate the project BOM against LCSC inventory to identify missing, obsolete, or alternate parts.                                                                                                                                                                                                                     |
-| `easyeda_bridge_probe_methods`          | `dev`   | `medium` | Query the EasyEDA Pro bridge for available API methods. Requires bridge connection. (dev/pro only)                                                                                                                                                                                                                     |
-| `easyeda_bridge_status`                 | `core`  | `low`    | Check EasyEDA Pro bridge connection status, version, and capabilities.                                                                                                                                                                                                                                                 |
-| `easyeda_component_probe`               | `dev`   | `low`    | Inspect live schematic component objects, including available methods and state getter values, to validate EasyEDA runtime mappings.                                                                                                                                                                                   |
-| `easyeda_drc_run`                       | `core`  | `medium` | Run design rule check (DRC) on the project to identify rule violations, clearance issues, and manufacturing constraints.                                                                                                                                                                                               |
-| `easyeda_erc_run`                       | `core`  | `medium` | Run electrical rule check (ERC) on the schematic to detect unconnected nets, short circuits, and electrical conflicts.                                                                                                                                                                                                 |
-| `easyeda_export_gerbers`                | `core`  | `medium` | Export PCB design to Gerber files for PCB fabrication.                                                                                                                                                                                                                                                                 |
-| `easyeda_export_netlist`                | `pro`   | `low`    | Export the schematic netlist in a specified EDA tool format (PADS, Allegro, or Altium).                                                                                                                                                                                                                                |
-| `easyeda_export_pdf`                    | `pro`   | `low`    | Export the schematic and/or board layout to PDF.                                                                                                                                                                                                                                                                       |
-| `easyeda_export_pick_place`             | `pro`   | `low`    | Export pick-and-place (centroid) file for PCB assembly. Contains component reference, position, rotation, and layer.                                                                                                                                                                                                   |
-| `easyeda_get_capabilities`              | `core`  | `low`    | Return server capabilities, including available profiles, enabled feature flags, and supported operations.                                                                                                                                                                                                             |
-| `easyeda_get_feature_flags`             | `core`  | `low`    | Return current feature flag values.                                                                                                                                                                                                                                                                                    |
-| `easyeda_get_server_config`             | `core`  | `low`    | Return safe (redacted) server configuration. Secrets are never exposed.                                                                                                                                                                                                                                                |
-| `easyeda_get_tool_profiles`             | `core`  | `low`    | List available tool profiles and their descriptions.                                                                                                                                                                                                                                                                   |
-| `easyeda_health_check`                  | `core`  | `low`    | Return server health status, including runtime version, active profile, bridge state, and config validity.                                                                                                                                                                                                             |
-| `easyeda_jlcpcb_quote_workflow`         | `pro`   | `medium` | Prepare a non-binding JLCPCB quote workflow snapshot with explicit human-review gates and audit evidence. This tool never places orders or performs paid operations.                                                                                                                                                   |
-| `easyeda_live_smoke_report`             | `dev`   | `low`    | Run a read-only live smoke report against the connected EasyEDA bridge and return status, API inventory, components, wires, and schematic nets in one response.                                                                                                                                                        |
-| `easyeda_observability_report`          | `core`  | `low`    | Return latency budgets, runtime metrics, cache/vendor timing snapshot, and storage retention policy for performance diagnostics.                                                                                                                                                                                       |
-| `easyeda_pcb_add_board_outline`         | `full`  | `high`   | Author the board frame on the Board Outline layer (EPCB_LayerId 11). shape="rect" (x,y,width,height), "circle" (cx,cy,radius), or "polygon" (points). Draws closed line/arc geometry that EasyEDA treats as the board shape.                                                                                           |
-| `easyeda_pcb_add_hole`                  | `full`  | `high`   | Add a non-plated (NPTH) tooling/mounting hole or a plated mounting hole. Implemented as a pad on the MULTI layer with a hole; plated=false yields NPTH, plated=true a plated hole.                                                                                                                                     |
-| `easyeda_pcb_add_pad`                   | `full`  | `high`   | Add an SMD or through-hole pad (PCB_PrimitivePad.create). SMD: layer 1                                                                                                                                                                                                                                                 | 2, omit holeDiameter. THT: provide holeDiameter (auto-placed on MULTI layer 12). padShape defaults to a round ELLIPSE sized by width/height; pass an explicit padShape/hole array to override. |
-| `easyeda_pcb_add_silkscreen_line`       | `full`  | `high`   | Draw silkscreen artwork (logos, outlines, glyphs) as connected line segments via PCB_PrimitiveLine on layer 3 (top) or 4 (bottom). Provide a points polyline.                                                                                                                                                          |
-| `easyeda_pcb_add_silkscreen_text`       | `full`  | `high`   | Place silkscreen/document-layer text via PCB_PrimitiveString.create (a controlled write). layer 3=top silk, 4=bottom silk, 13=document. alignMode 1..9 (5=center). fontFamily must be pre-imported. Use frame="bottom-view" for bottom-layer text whose rotation was computed in the top-plane frame.                  |
-| `easyeda_pcb_add_solid_region`          | `full`  | `high`   | Author a solid copper (or other-layer) fill region via PCB_PrimitiveFill.create. shape="polygon" (points), "rect" (x,y,width,height), or "circle" (cx,cy,radius). Tie to a net with netName.                                                                                                                           |
-| `easyeda_pcb_add_track`                 | `full`  | `high`   | Draw a copper track/trace segment on the PCB board.                                                                                                                                                                                                                                                                    |
-| `easyeda_pcb_add_via`                   | `full`  | `high`   | Place a via to connect different copper layers on the PCB board.                                                                                                                                                                                                                                                       |
-| `easyeda_pcb_add_zone`                  | `full`  | `high`   | Create a copper pour zone on a specific layer with clearance settings.                                                                                                                                                                                                                                                 |
-| `easyeda_pcb_constraint_check`          | `core`  | `low`    | Run PCB constraint validation against the board design. Checks board outline, layer stackup, net classes, clearance rules, keepout areas, placement zones, mounting holes, fiducials, and manufacturing constraints.                                                                                                   |
-| `easyeda_pcb_constraint_report`         | `core`  | `low`    | Generate a human-readable report explaining which PCB constraints were applied and which require manual review.                                                                                                                                                                                                        |
-| `easyeda_pcb_delete_component`          | `full`  | `high`   | Delete components from the PCB layout by their primitive IDs.                                                                                                                                                                                                                                                          |
-| `easyeda_pcb_document_save`             | `full`  | `medium` | Persist extension-authored PCB primitives via PCB_Document.save(uuid). EasyEDA does not preserve API-created objects until the document is saved, and save() will not persist without a real document uuid — so documentUuid (the open PCB/board uuid) is REQUIRED.                                                    |
-| `easyeda_pcb_import_project_file`       | `full`  | `high`   | Import (writes into the project) a KiCad/Altium/EAGLE/OrCAD/PADS/LTspice file into the current or existing EasyEDA Pro project via SYS_FileManager.importProjectByProjectFile. Desktop client only; needs external-interaction permission. filePath = absolute local path (KiCad .zip preferred for fileType "KiCad"). |
-| `easyeda_pcb_import_ses_route`          | `full`  | `high`   | Apply a Specctra SES (autorouter session) file — writes the routes onto the OPEN PCB via PCB_Document.importAutoRouteSesFile — the Freerouting round-trip. The board must already have components, nets, and outline. filePath must be absolute.                                                                       |
-| `easyeda_pcb_import_tscircuit_board`    | `full`  | `high`   | Whole-board fallback: builds a tscircuit board to a KiCad archive, then imports it into EasyEDA via the bridge. skipBuild=true imports a pre-built zip. The build path (skipBuild=false) spawns a local Node process, so it requires BRIDGE_RAW_EXEC_ENABLED=true and MCP_RAW_EXEC_EXPERIMENTAL=true.                  |
-| `easyeda_pcb_modify_component`          | `full`  | `high`   | Modify component properties in the PCB layout.                                                                                                                                                                                                                                                                         |
-| `easyeda_pcb_place_component`           | `full`  | `high`   | Place a component footprint on the active PCB layout. The real EasyEDA API (PCB_PrimitiveComponent.create) requires a library ITEM OBJECT, so pass libraryUuid + uuid (device or footprint) — a bare footprint string is a legacy fallback that generally will not resolve. layer: 1=TOP, 2=BOTTOM.                    |
-| `easyeda_pcb_place_component_group`     | `full`  | `high`   | Create a high-level, constraint-checked placement plan for a group of components and optionally apply it after explicit confirmation.                                                                                                                                                                                  |
-| `easyeda_pcb_production_review`         | `core`  | `medium` | Run fabrication, assembly, and testability production review rules for PCB handoff. Reports severity-ranked DFM/DFA/DFT findings with actionable remediation before Gerber export or manufacturing submission.                                                                                                         |
-| `easyeda_pcb_route_path_plan`           | `full`  | `high`   | Create a high-level, constraint-checked route path plan for one net and optionally apply it after explicit confirmation.                                                                                                                                                                                               |
-| `easyeda_power_tree_analyze`            | `core`  | `medium` | Analyze supply sources, regulators, loads, protection, bulk capacitance, current budget, dropout, and regulator thermal risk. Returns machine-readable issues and a human-readable summary.                                                                                                                            |
-| `easyeda_production_qa_artifacts`       | `pro`   | `low`    | Generate testpoint checklist, assembly notes, bring-up plan, production QA checklist, and machine-readable QA manifest for board handoff.                                                                                                                                                                              |
-| `easyeda_project_save`                  | `core`  | `medium` | Explicitly save the current EasyEDA Pro project. This ensures all netlist changes, net flags, pin connections, and other mutations are persisted to the project file. Save is never implicit — the caller must explicitly request it. Requires confirmWrite.                                                           |
-| `easyeda_rule_check_summary`            | `core`  | `low`    | Get a summary of all design and electrical rule check results for the project.                                                                                                                                                                                                                                         |
-| `easyeda_run_self_test`                 | `core`  | `low`    | Run internal self-test to verify server integrity, config, and bridge connectivity.                                                                                                                                                                                                                                    |
-| `easyeda_schematic_add_wire`            | `core`  | `medium` | Add a wire segment connecting schematic coordinates/pins.                                                                                                                                                                                                                                                              |
-| `easyeda_schematic_component_pins`      | `core`  | `low`    | Get exact pin numbers, names, and coordinates for a schematic component by its primitive ID.                                                                                                                                                                                                                           |
-| `easyeda_schematic_components`          | `core`  | `low`    | List all components in the schematic with their properties including reference, value, footprint, LCSC part number, manufacturer, and datasheet.                                                                                                                                                                       |
-| `easyeda_schematic_connect_pin_to_net`  | `core`  | `medium` | Connect a specific component pin to a named net. This creates an actual SCH_Netlist entry associating the pin with the net. If the net does not exist yet, it is created on the fly. This is the core tool for populating the real EasyEDA netlist with pin-to-net connectivity.                                       |
-| `easyeda_schematic_connect_pins_by_net` | `core`  | `medium` | Connect multiple component pins to a named net in a single operation. All specified pins will be assigned to the same net, creating SCH_Netlist entries. If the net does not exist, it is created. This is the bulk equivalent of connect_pin_to_net.                                                                  |
-| `easyeda_schematic_create_net_flag`     | `core`  | `medium` | Create a named schematic net flag at specified coordinates. This controlled write declares real SCH_Net connectivity in the EasyEDA Pro netlist.                                                                                                                                                                       |
-| `easyeda_schematic_create_net_port`     | `core`  | `medium` | Place a hierarchical net port (off-sheet connector) on the schematic. Net ports create named connections that span multiple schematic sheets, appearing as real SCH_Net entries in the netlist.                                                                                                                        |
-| `easyeda_schematic_delete_primitive`    | `core`  | `medium` | Delete components, wires, or other drawing objects from the schematic by their primitive UUIDs.                                                                                                                                                                                                                        |
-| `easyeda_schematic_modify_primitive`    | `core`  | `medium` | Modify properties (value, reference, attributes, etc.) of a schematic component/object.                                                                                                                                                                                                                                |
-| `easyeda_schematic_net_detail`          | `core`  | `low`    | Get full details for a specific net in the schematic including all connected pins and components.                                                                                                                                                                                                                      |
-| `easyeda_schematic_nets`                | `core`  | `low`    | List all nets in the schematic with their node connections.                                                                                                                                                                                                                                                            |
-| `easyeda_schematic_place_component`     | `core`  | `medium` | Place a library component/device on the active schematic sheet.                                                                                                                                                                                                                                                        |
-| `easyeda_schematic_search_device`       | `core`  | `low`    | Search for schematic symbols/devices in the EasyEDA library by keywords.                                                                                                                                                                                                                                               |
-| `easyeda_schematic_validate_netlist`    | `core`  | `low`    | Validate the EasyEDA Pro schematic netlist for connectivity issues. Reports net names, connected component references and pins, floating pins, graphical wires without netlist connectivity, and mismatches between visual wires and actual SCH_Net/SCH_Netlist entries. This is a read-only diagnostic tool.          |
-| `easyeda_semantic_erc_validate`         | `core`  | `medium` | Run semantic electrical-rule validation over a netlist with pin electrical types to detect output contention, floating inputs, power conflicts, missing power pins, missing decoupling, and voltage-domain mismatches.                                                                                                 |
-| `easyeda_wire_probe`                    | `dev`   | `low`    | Inspect live schematic wire objects, including line coordinates, net names, methods, and state getter values, to validate EasyEDA runtime mappings.                                                                                                                                                                    |
+| Tool Name                               | Profile | Risk     | Description                                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------- | ------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `easyeda_api_call`                      | `full`  | `high`   | Controlled call to a documented EasyEDA class method by path, for example SCH_PrimitiveWire.getAll. This is not raw JavaScript execution.                                                                                                                                                                                     |
+| `easyeda_api_inventory`                 | `core`  | `low`    | Inspect the live EasyEDA extension runtime and list available documented API classes, runtime paths, and methods.                                                                                                                                                                                                             |
+| `easyeda_board_dimensions`              | `core`  | `low`    | Get the PCB board outline dimensions, shape, and mounting hole information.                                                                                                                                                                                                                                                   |
+| `easyeda_board_features`                | `core`  | `low`    | Get counts of board features including vias, tracks, copper zones, and pads.                                                                                                                                                                                                                                                  |
+| `easyeda_board_layers`                  | `core`  | `low`    | List all layers in the PCB design including signal, power, plane, and mechanical layers.                                                                                                                                                                                                                                      |
+| `easyeda_board_stackup`                 | `core`  | `low`    | Get the PCB layer stackup including thickness, material, and dielectric constants.                                                                                                                                                                                                                                            |
+| `easyeda_bom_export`                    | `core`  | `low`    | Export the bill of materials to a file on disk in the specified format.                                                                                                                                                                                                                                                       |
+| `easyeda_bom_generate`                  | `core`  | `low`    | Generate a bill of materials for the project with grouping and formatting options.                                                                                                                                                                                                                                            |
+| `easyeda_bom_quality_report`            | `core`  | `medium` | Generate a BOM quality report that identifies unavailable, single-source, missing-MPN, missing-footprint, and low-stock items across configured suppliers.                                                                                                                                                                    |
+| `easyeda_bom_sourcing`                  | `core`  | `medium` | Retrieve pricing and availability information for all parts in the project BOM from specified suppliers.                                                                                                                                                                                                                      |
+| `easyeda_bom_validate`                  | `core`  | `medium` | Validate the project BOM against LCSC inventory to identify missing, obsolete, or alternate parts.                                                                                                                                                                                                                            |
+| `easyeda_bridge_probe_methods`          | `dev`   | `medium` | Query the EasyEDA Pro bridge for available API methods. Requires bridge connection. (dev/pro only)                                                                                                                                                                                                                            |
+| `easyeda_bridge_status`                 | `core`  | `low`    | Check EasyEDA Pro bridge connection status, version, and capabilities.                                                                                                                                                                                                                                                        |
+| `easyeda_component_probe`               | `dev`   | `low`    | Inspect live schematic component objects, including available methods and state getter values, to validate EasyEDA runtime mappings.                                                                                                                                                                                          |
+| `easyeda_drc_run`                       | `core`  | `medium` | Run design rule check (DRC) on the project to identify rule violations, clearance issues, and manufacturing constraints.                                                                                                                                                                                                      |
+| `easyeda_editor_activate`               | `full`  | `low`    | Switch editor focus to a specific tab by tabId, or by document uuid/name (opening it first if needed). This is how the agent cycles between pages/boards. Focus is a prerequisite for editing that document.                                                                                                                  |
+| `easyeda_editor_close`                  | `full`  | `medium` | Close an editor tab by tabId. WARNING: closing a document with unsaved changes discards them - save first with easyeda_project_save / easyeda_pcb_document_save. Requires confirmWrite=true.                                                                                                                                  |
+| `easyeda_editor_focus_document`         | `full`  | `low`    | One-shot convenience: resolve a document by uuid or name, open it if needed, and activate it - leaving it focused and ready to edit. Equivalent to easyeda_editor_open with activate=true, but accepts name resolution.                                                                                                       |
+| `easyeda_editor_list_tabs`              | `core`  | `low`    | List the tabs currently open in the EasyEDA editor, including tabId, title, document type, and split-screen id. Reads across all split screens without changing focus.                                                                                                                                                        |
+| `easyeda_editor_open`                   | `full`  | `low`    | Open a schematic sheet page, PCB, or panel by uuid or name in the currently-open project, returning its tabId. Non-destructive: opening an already-open document returns its existing tab. Optionally activate (focus) it. The document must belong to the currently-open project.                                            |
+| `easyeda_editor_screenshot`             | `core`  | `low`    | Capture the rendered canvas of a tab as an image so the agent can visually inspect it. Pass a tabId to capture a specific (even non-focused) tab; omit it to capture the last-focused canvas. Returns an image content block. Uses a @beta EasyEDA API - if unavailable on the installed build it returns not_available=true. |
+| `easyeda_erc_run`                       | `core`  | `medium` | Run electrical rule check (ERC) on the schematic to detect unconnected nets, short circuits, and electrical conflicts.                                                                                                                                                                                                        |
+| `easyeda_export_gerbers`                | `core`  | `medium` | Export PCB design to Gerber files for PCB fabrication.                                                                                                                                                                                                                                                                        |
+| `easyeda_export_netlist`                | `pro`   | `low`    | Export the schematic netlist in a specified EDA tool format (PADS, Allegro, or Altium).                                                                                                                                                                                                                                       |
+| `easyeda_export_pdf`                    | `pro`   | `low`    | Export the schematic and/or board layout to PDF.                                                                                                                                                                                                                                                                              |
+| `easyeda_export_pick_place`             | `pro`   | `low`    | Export pick-and-place (centroid) file for PCB assembly. Contains component reference, position, rotation, and layer.                                                                                                                                                                                                          |
+| `easyeda_get_capabilities`              | `core`  | `low`    | Return server capabilities, including available profiles, enabled feature flags, and supported operations.                                                                                                                                                                                                                    |
+| `easyeda_get_feature_flags`             | `core`  | `low`    | Return current feature flag values.                                                                                                                                                                                                                                                                                           |
+| `easyeda_get_server_config`             | `core`  | `low`    | Return safe (redacted) server configuration. Secrets are never exposed.                                                                                                                                                                                                                                                       |
+| `easyeda_get_tool_profiles`             | `core`  | `low`    | List available tool profiles and their descriptions.                                                                                                                                                                                                                                                                          |
+| `easyeda_health_check`                  | `core`  | `low`    | Return server health status, including runtime version, active profile, bridge state, and config validity.                                                                                                                                                                                                                    |
+| `easyeda_jlcpcb_quote_workflow`         | `pro`   | `medium` | Prepare a non-binding JLCPCB quote workflow snapshot with explicit human-review gates and audit evidence. This tool never places orders or performs paid operations.                                                                                                                                                          |
+| `easyeda_live_smoke_report`             | `dev`   | `low`    | Run a read-only live smoke report against the connected EasyEDA bridge and return status, API inventory, components, wires, and schematic nets in one response.                                                                                                                                                               |
+| `easyeda_observability_report`          | `core`  | `low`    | Return latency budgets, runtime metrics, cache/vendor timing snapshot, and storage retention policy for performance diagnostics.                                                                                                                                                                                              |
+| `easyeda_pcb_add_board_outline`         | `full`  | `high`   | Author the board frame on the Board Outline layer (EPCB_LayerId 11). shape="rect" (x,y,width,height), "circle" (cx,cy,radius), or "polygon" (points). Draws closed line/arc geometry that EasyEDA treats as the board shape.                                                                                                  |
+| `easyeda_pcb_add_hole`                  | `full`  | `high`   | Add a non-plated (NPTH) tooling/mounting hole or a plated mounting hole. Implemented as a pad on the MULTI layer with a hole; plated=false yields NPTH, plated=true a plated hole.                                                                                                                                            |
+| `easyeda_pcb_add_pad`                   | `full`  | `high`   | Add an SMD or through-hole pad (PCB_PrimitivePad.create). SMD: layer 1                                                                                                                                                                                                                                                        | 2, omit holeDiameter. THT: provide holeDiameter (auto-placed on MULTI layer 12). padShape defaults to a round ELLIPSE sized by width/height; pass an explicit padShape/hole array to override. |
+| `easyeda_pcb_add_silkscreen_line`       | `full`  | `high`   | Draw silkscreen artwork (logos, outlines, glyphs) as connected line segments via PCB_PrimitiveLine on layer 3 (top) or 4 (bottom). Provide a points polyline.                                                                                                                                                                 |
+| `easyeda_pcb_add_silkscreen_text`       | `full`  | `high`   | Place silkscreen/document-layer text via PCB_PrimitiveString.create (a controlled write). layer 3=top silk, 4=bottom silk, 13=document. alignMode 1..9 (5=center). fontFamily must be pre-imported. Use frame="bottom-view" for bottom-layer text whose rotation was computed in the top-plane frame.                         |
+| `easyeda_pcb_add_solid_region`          | `full`  | `high`   | Author a solid copper (or other-layer) fill region via PCB_PrimitiveFill.create. shape="polygon" (points), "rect" (x,y,width,height), or "circle" (cx,cy,radius). Tie to a net with netName.                                                                                                                                  |
+| `easyeda_pcb_add_track`                 | `full`  | `high`   | Draw a copper track/trace segment on the PCB board.                                                                                                                                                                                                                                                                           |
+| `easyeda_pcb_add_via`                   | `full`  | `high`   | Place a via to connect different copper layers on the PCB board.                                                                                                                                                                                                                                                              |
+| `easyeda_pcb_add_zone`                  | `full`  | `high`   | Create a copper pour zone on a specific layer with clearance settings.                                                                                                                                                                                                                                                        |
+| `easyeda_pcb_constraint_check`          | `core`  | `low`    | Run PCB constraint validation against the board design. Checks board outline, layer stackup, net classes, clearance rules, keepout areas, placement zones, mounting holes, fiducials, and manufacturing constraints.                                                                                                          |
+| `easyeda_pcb_constraint_report`         | `core`  | `low`    | Generate a human-readable report explaining which PCB constraints were applied and which require manual review.                                                                                                                                                                                                               |
+| `easyeda_pcb_delete_component`          | `full`  | `high`   | Delete components from the PCB layout by their primitive IDs.                                                                                                                                                                                                                                                                 |
+| `easyeda_pcb_document_save`             | `full`  | `medium` | Persist extension-authored PCB primitives via PCB_Document.save(uuid). EasyEDA does not preserve API-created objects until the document is saved, and save() will not persist without a real document uuid — so documentUuid (the open PCB/board uuid) is REQUIRED.                                                           |
+| `easyeda_pcb_import_project_file`       | `full`  | `high`   | Import (writes into the project) a KiCad/Altium/EAGLE/OrCAD/PADS/LTspice file into the current or existing EasyEDA Pro project via SYS_FileManager.importProjectByProjectFile. Desktop client only; needs external-interaction permission. filePath = absolute local path (KiCad .zip preferred for fileType "KiCad").        |
+| `easyeda_pcb_import_ses_route`          | `full`  | `high`   | Apply a Specctra SES (autorouter session) file — writes the routes onto the OPEN PCB via PCB_Document.importAutoRouteSesFile — the Freerouting round-trip. The board must already have components, nets, and outline. filePath must be absolute.                                                                              |
+| `easyeda_pcb_import_tscircuit_board`    | `full`  | `high`   | Whole-board fallback: builds a tscircuit board to a KiCad archive, then imports it into EasyEDA via the bridge. skipBuild=true imports a pre-built zip. The build path (skipBuild=false) spawns a local Node process, so it requires BRIDGE_RAW_EXEC_ENABLED=true and MCP_RAW_EXEC_EXPERIMENTAL=true.                         |
+| `easyeda_pcb_modify_component`          | `full`  | `high`   | Modify component properties in the PCB layout.                                                                                                                                                                                                                                                                                |
+| `easyeda_pcb_place_component`           | `full`  | `high`   | Place a component footprint on the active PCB layout. The real EasyEDA API (PCB_PrimitiveComponent.create) requires a library ITEM OBJECT, so pass libraryUuid + uuid (device or footprint) — a bare footprint string is a legacy fallback that generally will not resolve. layer: 1=TOP, 2=BOTTOM.                           |
+| `easyeda_pcb_place_component_group`     | `full`  | `high`   | Create a high-level, constraint-checked placement plan for a group of components and optionally apply it after explicit confirmation.                                                                                                                                                                                         |
+| `easyeda_pcb_production_review`         | `core`  | `medium` | Run fabrication, assembly, and testability production review rules for PCB handoff. Reports severity-ranked DFM/DFA/DFT findings with actionable remediation before Gerber export or manufacturing submission.                                                                                                                |
+| `easyeda_pcb_route_path_plan`           | `full`  | `high`   | Create a high-level, constraint-checked route path plan for one net and optionally apply it after explicit confirmation.                                                                                                                                                                                                      |
+| `easyeda_power_tree_analyze`            | `core`  | `medium` | Analyze supply sources, regulators, loads, protection, bulk capacitance, current budget, dropout, and regulator thermal risk. Returns machine-readable issues and a human-readable summary.                                                                                                                                   |
+| `easyeda_production_qa_artifacts`       | `pro`   | `low`    | Generate testpoint checklist, assembly notes, bring-up plan, production QA checklist, and machine-readable QA manifest for board handoff.                                                                                                                                                                                     |
+| `easyeda_project_documents`             | `core`  | `low`    | Enumerate every openable document in the currently-open EasyEDA project: schematic sheet pages, PCBs, and panels, each with its uuid, name, and kind. Use the uuid or name with easyeda_editor_open / easyeda_editor_activate, or as the `document` target on write tools.                                                    |
+| `easyeda_project_save`                  | `core`  | `medium` | Explicitly save the current EasyEDA Pro project. This ensures all netlist changes, net flags, pin connections, and other mutations are persisted to the project file. Save is never implicit — the caller must explicitly request it. Requires confirmWrite.                                                                  |
+| `easyeda_rule_check_summary`            | `core`  | `low`    | Get a summary of all design and electrical rule check results for the project.                                                                                                                                                                                                                                                |
+| `easyeda_run_self_test`                 | `core`  | `low`    | Run internal self-test to verify server integrity, config, and bridge connectivity.                                                                                                                                                                                                                                           |
+| `easyeda_schematic_add_wire`            | `core`  | `medium` | Add a wire segment connecting schematic coordinates/pins.                                                                                                                                                                                                                                                                     |
+| `easyeda_schematic_component_pins`      | `core`  | `low`    | Get exact pin numbers, names, and coordinates for a schematic component by its primitive ID.                                                                                                                                                                                                                                  |
+| `easyeda_schematic_components`          | `core`  | `low`    | List all components in the schematic with their properties including reference, value, footprint, LCSC part number, manufacturer, and datasheet.                                                                                                                                                                              |
+| `easyeda_schematic_connect_pin_to_net`  | `core`  | `medium` | Connect a specific component pin to a named net. This creates an actual SCH_Netlist entry associating the pin with the net. If the net does not exist yet, it is created on the fly. This is the core tool for populating the real EasyEDA netlist with pin-to-net connectivity.                                              |
+| `easyeda_schematic_connect_pins_by_net` | `core`  | `medium` | Connect multiple component pins to a named net in a single operation. All specified pins will be assigned to the same net, creating SCH_Netlist entries. If the net does not exist, it is created. This is the bulk equivalent of connect_pin_to_net.                                                                         |
+| `easyeda_schematic_create_net_flag`     | `core`  | `medium` | Create a named schematic net flag at specified coordinates. This controlled write declares real SCH_Net connectivity in the EasyEDA Pro netlist.                                                                                                                                                                              |
+| `easyeda_schematic_create_net_port`     | `core`  | `medium` | Place a hierarchical net port (off-sheet connector) on the schematic. Net ports create named connections that span multiple schematic sheets, appearing as real SCH_Net entries in the netlist.                                                                                                                               |
+| `easyeda_schematic_delete_primitive`    | `core`  | `medium` | Delete components, wires, or other drawing objects from the schematic by their primitive UUIDs.                                                                                                                                                                                                                               |
+| `easyeda_schematic_modify_primitive`    | `core`  | `medium` | Modify properties (value, reference, attributes, etc.) of a schematic component/object.                                                                                                                                                                                                                                       |
+| `easyeda_schematic_net_detail`          | `core`  | `low`    | Get full details for a specific net in the schematic including all connected pins and components.                                                                                                                                                                                                                             |
+| `easyeda_schematic_nets`                | `core`  | `low`    | List all nets in the schematic with their node connections.                                                                                                                                                                                                                                                                   |
+| `easyeda_schematic_place_component`     | `core`  | `medium` | Place a library component/device on the active schematic sheet.                                                                                                                                                                                                                                                               |
+| `easyeda_schematic_search_device`       | `core`  | `low`    | Search for schematic symbols/devices in the EasyEDA library by keywords.                                                                                                                                                                                                                                                      |
+| `easyeda_schematic_validate_netlist`    | `core`  | `low`    | Validate the EasyEDA Pro schematic netlist for connectivity issues. Reports net names, connected component references and pins, floating pins, graphical wires without netlist connectivity, and mismatches between visual wires and actual SCH_Net/SCH_Netlist entries. This is a read-only diagnostic tool.                 |
+| `easyeda_semantic_erc_validate`         | `core`  | `medium` | Run semantic electrical-rule validation over a netlist with pin electrical types to detect output contention, floating inputs, power conflicts, missing power pins, missing decoupling, and voltage-domain mismatches.                                                                                                        |
+| `easyeda_wire_probe`                    | `dev`   | `low`    | Inspect live schematic wire objects, including line coordinates, net names, methods, and state getter values, to validate EasyEDA runtime mappings.                                                                                                                                                                           |
 
 ---
 
@@ -515,6 +522,171 @@ Returns a JSON object matching the schema:
   warning_count: any;
   passed: any;
   not_available: any;
+}
+```
+
+---
+
+## `easyeda_editor_activate`
+
+**Profile:** `full` | **Risk Level:** `low`
+
+> Switch editor focus to a specific tab by tabId, or by document uuid/name (opening it first if needed). This is how the agent cycles between pages/boards. Focus is a prerequisite for editing that document.
+
+### Input Parameters
+
+| Parameter | Type  | Required | Description |
+| --------- | ----- | -------- | ----------- |
+| `tabId`   | `any` | No       |             |
+| `uuid`    | `any` | No       |             |
+| `name`    | `any` | No       |             |
+
+### Output Format
+
+Returns a JSON object matching the schema:
+
+```ts
+{
+  ok: any;
+  tabId: any;
+  error: any;
+}
+```
+
+---
+
+## `easyeda_editor_close`
+
+**Profile:** `full` | **Risk Level:** `medium`
+
+> Close an editor tab by tabId. WARNING: closing a document with unsaved changes discards them - save first with easyeda_project_save / easyeda_pcb_document_save. Requires confirmWrite=true.
+
+### Input Parameters
+
+| Parameter      | Type  | Required | Description |
+| -------------- | ----- | -------- | ----------- |
+| `tabId`        | `any` | Yes      |             |
+| `confirmWrite` | `any` | Yes      |             |
+
+### Output Format
+
+Returns a JSON object matching the schema:
+
+```ts
+{
+  ok: any;
+  error: any;
+}
+```
+
+---
+
+## `easyeda_editor_focus_document`
+
+**Profile:** `full` | **Risk Level:** `low`
+
+> One-shot convenience: resolve a document by uuid or name, open it if needed, and activate it - leaving it focused and ready to edit. Equivalent to easyeda_editor_open with activate=true, but accepts name resolution.
+
+### Input Parameters
+
+| Parameter | Type  | Required | Description |
+| --------- | ----- | -------- | ----------- |
+| `tabId`   | `any` | No       |             |
+| `uuid`    | `any` | No       |             |
+| `name`    | `any` | No       |             |
+
+### Output Format
+
+Returns a JSON object matching the schema:
+
+```ts
+{
+  ok: any;
+  tabId: any;
+  error: any;
+}
+```
+
+---
+
+## `easyeda_editor_list_tabs`
+
+**Profile:** `core` | **Risk Level:** `low`
+
+> List the tabs currently open in the EasyEDA editor, including tabId, title, document type, and split-screen id. Reads across all split screens without changing focus.
+
+### Input Parameters
+
+No parameters required.
+
+### Output Format
+
+Returns a JSON object matching the schema:
+
+```ts
+{
+  ok: any;
+  tabs: any;
+  count: any;
+  error: any;
+}
+```
+
+---
+
+## `easyeda_editor_open`
+
+**Profile:** `full` | **Risk Level:** `low`
+
+> Open a schematic sheet page, PCB, or panel by uuid or name in the currently-open project, returning its tabId. Non-destructive: opening an already-open document returns its existing tab. Optionally activate (focus) it. The document must belong to the currently-open project.
+
+### Input Parameters
+
+| Parameter  | Type  | Required | Description |
+| ---------- | ----- | -------- | ----------- |
+| `uuid`     | `any` | No       |             |
+| `name`     | `any` | No       |             |
+| `activate` | `any` | Yes      |             |
+
+### Output Format
+
+Returns a JSON object matching the schema:
+
+```ts
+{
+  ok: any;
+  tabId: any;
+  activated: any;
+  error: any;
+}
+```
+
+---
+
+## `easyeda_editor_screenshot`
+
+**Profile:** `core` | **Risk Level:** `low`
+
+> Capture the rendered canvas of a tab as an image so the agent can visually inspect it. Pass a tabId to capture a specific (even non-focused) tab; omit it to capture the last-focused canvas. Returns an image content block. Uses a @beta EasyEDA API - if unavailable on the installed build it returns not_available=true.
+
+### Input Parameters
+
+| Parameter | Type  | Required | Description |
+| --------- | ----- | -------- | ----------- |
+| `tabId`   | `any` | No       |             |
+
+### Output Format
+
+Returns a JSON object matching the schema:
+
+```ts
+{
+  ok: any;
+  imageBase64: any;
+  mime: any;
+  bytes: any;
+  not_available: any;
+  error: any;
 }
 ```
 
@@ -1695,6 +1867,32 @@ Returns a JSON object matching the schema:
   checklist: any;
   artifacts: any;
   summary: any;
+}
+```
+
+---
+
+## `easyeda_project_documents`
+
+**Profile:** `core` | **Risk Level:** `low`
+
+> Enumerate every openable document in the currently-open EasyEDA project: schematic sheet pages, PCBs, and panels, each with its uuid, name, and kind. Use the uuid or name with easyeda_editor_open / easyeda_editor_activate, or as the `document` target on write tools.
+
+### Input Parameters
+
+No parameters required.
+
+### Output Format
+
+Returns a JSON object matching the schema:
+
+```ts
+{
+  ok: any;
+  project: any;
+  documents: any;
+  count: any;
+  error: any;
 }
 ```
 

@@ -1257,6 +1257,149 @@ async function resolveSchComponentId(idOrDesignator: string): Promise<string> {
   return idOrDesignator;
 }
 
+// Flatten a DMT_EditorControl split-screen tree into a flat tab list. The tree
+// nests tabs under `tabs` and recurses through `children` (IDMT_EditorSplitScreenItem).
+function flattenSplitScreenTabs(
+  node: Record<string, unknown> | undefined | null,
+): Array<Record<string, unknown>> {
+  if (!node || typeof node !== 'object') return [];
+  const out: Array<Record<string, unknown>> = [];
+  const splitScreenId = typeof node.id === 'string' ? node.id : undefined;
+  const tabs = Array.isArray(node.tabs) ? node.tabs : [];
+  for (const tab of tabs) {
+    if (tab && typeof tab === 'object') {
+      out.push({ ...(tab as Record<string, unknown>), splitScreenId });
+    }
+  }
+  const children = Array.isArray(node.children) ? node.children : [];
+  for (const child of children) {
+    out.push(...flattenSplitScreenTabs(child as Record<string, unknown>));
+  }
+  return out;
+}
+
+// Renderable canvas tab documentTypes (EDMT_EditorDocumentType): SCHEMATIC_PAGE=1,
+// PCB=3, PCB_2D_PREVIEW=12, PCB_3D_PREVIEW=15, PANEL=26, PANEL_3D_PREVIEW=27.
+// HOME(-1), BLANK(0), PROJECT(5) are NOT canvases and yield no rendered image.
+const CANVAS_DOCUMENT_TYPES = new Set([1, 3, 12, 15, 26, 27]);
+
+// Duck-typed Blob check: the value may be a Blob from another realm (worker /
+// sandbox), where `instanceof Blob` fails but it still has arrayBuffer()/size.
+function isUsableBlob(value: unknown): value is Blob {
+  if (!value || typeof value !== 'object') return false;
+  const b = value as { arrayBuffer?: unknown; size?: unknown };
+  return typeof b.arrayBuffer === 'function' || typeof b.size === 'number';
+}
+
+function describeValue(value: unknown): string {
+  if (value === undefined) return 'undefined';
+  if (value === null) return 'null';
+  if (typeof value !== 'object') return typeof value;
+  const ctor = (value as { constructor?: { name?: string } }).constructor?.name;
+  const size = (value as { size?: unknown }).size;
+  return `${ctor ?? 'object'}${typeof size === 'number' ? `(size=${size})` : ''}`;
+}
+
+// Convert a canvas-render Blob into a base64 payload. Robust across realms: uses
+// arrayBuffer() when present, else falls back to FileReader.readAsDataURL so a
+// valid cross-realm Blob is never wrongly dropped as "not available".
+async function blobToImagePayload(
+  blob: unknown,
+): Promise<{ imageBase64: string; mime: string; bytes: number } | null> {
+  if (!isUsableBlob(blob)) return null;
+  const typedBlob = blob as Blob & { arrayBuffer?: () => Promise<ArrayBuffer> };
+  if (typeof typedBlob.arrayBuffer === 'function') {
+    const buffer = await typedBlob.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 1) {
+      binary += String.fromCharCode(bytes[i] as number);
+    }
+    if (bytes.length === 0) return null;
+    return { imageBase64: btoa(binary), mime: typedBlob.type || 'image/png', bytes: bytes.length };
+  }
+  if (typeof FileReader !== 'undefined') {
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? ''));
+      reader.onerror = () => reject(reader.error ?? new Error('FileReader failed'));
+      reader.readAsDataURL(typedBlob as Blob);
+    });
+    const comma = dataUrl.indexOf(',');
+    if (comma < 0) return null;
+    const b64 = dataUrl.slice(comma + 1);
+    if (!b64) return null;
+    const semi = dataUrl.indexOf(';');
+    const mime = dataUrl.startsWith('data:') && semi > 5 ? dataUrl.slice(5, semi) : 'image/png';
+    // base64 length * 3/4 (minus padding) ~= byte count
+    const padding = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
+    return { imageBase64: b64, mime, bytes: Math.floor((b64.length * 3) / 4) - padding };
+  }
+  return null;
+}
+
+// Grab a rendered canvas image. Tries the requested/last-focused canvas first,
+// then (if that yields nothing) resolves actual canvas tabs from the split-screen
+// tree and retries each - so a headless flow with focus on a non-canvas page
+// still gets an image. Returns rich diagnostics when nothing renders.
+async function captureCanvasImage(
+  requestedTabId?: string,
+): Promise<Record<string, unknown>> {
+  const attempts: Array<{ tabId: string | null; returned: string }> = [];
+
+  async function tryGrab(tabId?: string): Promise<Record<string, unknown> | null> {
+    const raw = await callFirst(['dmt_EditorControl.getCurrentRenderedAreaImage'], tabId);
+    attempts.push({ tabId: tabId ?? null, returned: describeValue(raw) });
+    return await blobToImagePayload(raw);
+  }
+
+  // 1) As requested (explicit tabId) or last-focused canvas (undefined).
+  let payload = await tryGrab(requestedTabId);
+  let canvasTabs: Array<Record<string, unknown>> = [];
+
+  // 2) Fallback: enumerate real canvas tabs and try each. Some builds only
+  //    render the *focused* canvas, so if a background grab yields nothing we
+  //    activate that tab and retry once before giving up on it.
+  if (!payload) {
+    const tree = (await callFirst(['dmt_EditorControl.getSplitScreenTree'])) as
+      | Record<string, unknown>
+      | undefined;
+    canvasTabs = flattenSplitScreenTabs(tree).filter((t) =>
+      CANVAS_DOCUMENT_TYPES.has(Number(t.documentType)),
+    );
+    for (const tab of canvasTabs) {
+      const tabId = typeof tab.tabId === 'string' ? tab.tabId : undefined;
+      if (!tabId) continue;
+      if (tabId !== requestedTabId) {
+        payload = await tryGrab(tabId);
+        if (payload) break;
+      }
+      // Activate-then-retry (last resort for focus-only-render builds).
+      try {
+        await callFirst(['dmt_EditorControl.activateDocument'], tabId);
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      } catch {
+        /* activation best-effort */
+      }
+      payload = await tryGrab(tabId);
+      if (payload) break;
+    }
+  }
+
+  if (payload) return { ...payload };
+  return {
+    not_available: true,
+    reason:
+      'getCurrentRenderedAreaImage returned no image for the focused canvas or any open canvas tab. Open/activate a schematic or PCB tab, or pass an explicit tabId.',
+    attempts,
+    canvasTabs: canvasTabs.map((t) => ({
+      tabId: t.tabId,
+      title: t.title,
+      documentType: t.documentType,
+    })),
+  };
+}
+
 async function dispatch(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
   dbg(`→ ${method} ${safeStringify(params).slice(0, 300)}`);
   switch (method) {
@@ -1272,6 +1415,52 @@ async function dispatch(method: string, params: Record<string, unknown> = {}): P
       ]);
     case 'project.export':
       return callFirst(['dmt_Project.export', 'project.export'], params);
+    // ---- Editor / tab orchestration (headless multi-tab, plan section 2.1) ----
+    // All wrap eda.dmt_EditorControl / dmt_Project. These are tab-addressable and
+    // do NOT mutate design content, so an agent can navigate/open/inspect any tab
+    // in the currently-open project without the user focusing it manually.
+    case 'project.getInfo':
+      return callFirst(['dmt_Project.getCurrentProjectInfo']);
+    case 'editor.listTabs': {
+      const tree = (await callFirst(['dmt_EditorControl.getSplitScreenTree'])) as
+        | Record<string, unknown>
+        | undefined;
+      return { tabs: flattenSplitScreenTabs(tree), tree: tree ?? null };
+    }
+    case 'editor.openDocument': {
+      const tabId = (await callFirst(
+        ['dmt_EditorControl.openDocument'],
+        params.documentUuid,
+        params.splitScreenId,
+      )) as string | undefined;
+      if (tabId === undefined) {
+        throw newBridgeError(
+          'OPEN_DOCUMENT_FAILED',
+          `openDocument returned undefined for ${String(params.documentUuid)}`,
+          'The uuid must be a sheet-page / PCB / panel uuid within the currently-open project.',
+        );
+      }
+      return { tabId };
+    }
+    case 'editor.activateDocument': {
+      const ok = (await callFirst(
+        ['dmt_EditorControl.activateDocument'],
+        params.tabId,
+      )) as boolean;
+      return { ok: ok === true };
+    }
+    case 'editor.closeDocument': {
+      const ok = (await callFirst(['dmt_EditorControl.closeDocument'], params.tabId)) as boolean;
+      return { ok: ok === true };
+    }
+    case 'editor.screenshot':
+      return captureCanvasImage(typeof params.tabId === 'string' ? params.tabId : undefined);
+    case 'editor.zoomToAll':
+      return callFirst(['dmt_EditorControl.zoomToAllPrimitives'], params.tabId);
+    case 'editor.tileAll': {
+      const ok = (await callFirst(['dmt_EditorControl.tileAllDocumentToSplitScreen'])) as boolean;
+      return { ok: ok === true };
+    }
     case 'schematic.listNets':
       return listNetsApi();
     case 'schematic.getNetDetail': {

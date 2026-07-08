@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { ZodError, z } from 'zod';
 import { type ToolDefinition } from './types.js';
+import { documentTargetSchema } from './focus-lock.js';
 
 export const writeModeSchema = z.enum(['plan', 'preview', 'apply', 'verify']);
 export type WriteMode = z.infer<typeof writeModeSchema>;
@@ -108,10 +109,32 @@ export function registeredInputSchema(tool: ToolDefinition): z.ZodType {
   // it on the registered schema so plan/preview are honored. confirmWrite is
   // relaxed to optional here so a dry run does not require it; the registry
   // wrapper still enforces confirmWrite===true for the apply path.
-  return (tool.inputSchema as z.ZodObject<z.ZodRawShape>).extend({
+  // `document` lets a write target a specific tab (headless multi-tab). The MCP
+  // SDK strips undeclared keys before the registry wrapper runs, so it must be
+  // declared here for the registry to see raw.document and focus that tab first.
+  //
+  // We OVERWRITE the existing confirmWrite key (relaxing z.literal(true) to
+  // optional so plan/preview do not require it). In zod v4, ZodObject.extend()
+  // THROWS ("Cannot overwrite keys on object schemas containing refinements")
+  // when the tool's inputSchema carries a .refine()/.superRefine() - e.g.
+  // easyeda_pcb_add_solid_region. Left unhandled this crashes the whole server
+  // on startup at any profile that registers such a tool (-32000 Connection
+  // closed). .safeExtend() performs the same overwrite while preserving the
+  // refinement; fall back to .extend() only if safeExtend is unavailable
+  // (older zod). The real per-call validation still runs against the original
+  // refined tool.inputSchema in the registry, so no validation is lost.
+  const objectSchema = tool.inputSchema as z.ZodObject<z.ZodRawShape> & {
+    safeExtend?: (shape: z.ZodRawShape) => z.ZodType;
+  };
+  const extraShape: z.ZodRawShape = {
     confirmWrite: z.literal(true).optional(),
     writeMode: writeModeSchema.optional(),
-  });
+    document: documentTargetSchema.optional(),
+  };
+  if (typeof objectSchema.safeExtend === 'function') {
+    return objectSchema.safeExtend(extraShape);
+  }
+  return objectSchema.extend(extraShape);
 }
 
 export function registeredOutputSchema(tool: ToolDefinition): z.ZodType {

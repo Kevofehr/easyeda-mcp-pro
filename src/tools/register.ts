@@ -4,6 +4,7 @@ import { registerBomCoreTools } from './L1_bom_core.js';
 import { registerBomSourcingTools } from './L1_bom_sourcing.js';
 import { registerDiagnosticsCore } from './L0_diagnostics_core.js';
 import { registerDiagnosticsApi } from './L0_diagnostics_api.js';
+import { registerEditorTools } from './L1_editor.js';
 import { registerDrcErcTools } from './L1_drc_erc.js';
 import { registerExportTools } from './L1_export.js';
 import { registerPcbConstraintTools } from './L1_pcb_constraints.js';
@@ -15,6 +16,7 @@ import { type ToolRegistry } from './registry.js';
 export function registerBuiltinTools(registry: ToolRegistry, config: EnvConfig): void {
   registerDiagnosticsCore(registry, config);
   registerDiagnosticsApi(registry, config);
+  registerEditorTools(registry, config);
   registerSchematicReadTools(registry, config);
   registerSchematicWriteTools(registry, config);
   registerBomCoreTools(registry, config);
