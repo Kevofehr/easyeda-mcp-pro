@@ -44,3 +44,17 @@ secrets/
 REVIEW.md
 # Local-only internal planning/roadmap doc; never push
 docs/reference/headless-multitab-plan.md
+# Local code-analysis metadata
+.serena/
+.codebase-memory/
+
+# Local security-tool virtual environments
+.venv-pre-commit/
+.venv-semgrep/
+reports/
+
+# Generated Codecov reports
+easyeda-bridge-extension/coverage/
+
+# Project-local package-manager stores
+.pnpm-store/

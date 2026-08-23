@@ -15,9 +15,13 @@ npx easyeda-mcp-pro --doctor
 This diagnostic tool checks:
 
 - Node.js runtime version compatibility.
-- Presence of built files (`dist/index.js`).
-- Presence of the compiled extension package (`easyeda-bridge-extension.eext`).
+- Whether it is running from a source checkout, installed package, or production runtime.
+- Whether `dist/index.js` is non-empty and has the declared Node.js shebang.
+- Whether `easyeda-bridge-extension.eext` matches its bundled SHA-256 manifest.
 - Availability and reachability of local port `49620`.
+
+pnpm is required and version-checked only in a source checkout. pnpm is not required in an installed package or production runtime. If a runtime artifact is missing or corrupt, reinstall the package or container image instead of adding development tooling to production.
+The command exits with status `1` for these fatal runtime/configuration defects, while an offline bridge alone remains an informational result.
 
 ---
 
@@ -37,13 +41,23 @@ If you receive errors like `Bridge not connected` during tool execution:
 
 ## 3. Node.js Version Error
 
-The MCP server relies on modern JavaScript features only available in Node.js version **>=24** and **<27**.
+The MCP server supports Node.js **24.x**. Repository automation is pinned to **24.18.0**, and local pnpm workflows require exactly **11.5.1**.
 
 If you see compilation or runtime errors:
 
-1. Run `node -v` to check your version.
-2. Use `nvm` or your platform package manager to update:
+1. Run `node -v` and `pnpm --version` to check both runtimes.
+2. Restore the pinned toolchain:
+
    ```bash
-   nvm install 24
-   nvm use 24
+   nvm install 24.18.0
+   nvm use 24.18.0
+   corepack enable
+   corepack prepare pnpm@11.5.1 --activate
+   node scripts/check-runtime.mjs --require-pnpm
+   ```
+
+3. Use `nvm` or your platform package manager to update:
+   ```bash
+   nvm install 24.18.0
+   nvm use 24.18.0
    ```

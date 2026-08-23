@@ -76,7 +76,7 @@ OAUTH_JWKS_URI=https://your-idp.example.com/.well-known/jwks.json
 OAUTH_REQUIRED_SCOPES=easyeda:read
 ```
 
-The server enforces startup safety checks: **non-loopback HTTP without OAuth is rejected**, and `HTTP_AUTH_DISABLED=true` is rejected for production or non-loopback HTTP.
+The server enforces startup safety checks in every environment: **non-loopback HTTP without complete OAuth is rejected**, `ALLOWED_ORIGINS=*` is rejected remotely, and `HTTP_AUTH_DISABLED=true` is rejected for production or non-loopback HTTP.
 
 ### 2.2 Bridge Pairing Authentication
 
@@ -107,11 +107,25 @@ Tools are organized into hierarchical profiles: `core` < `pro` < `full` < `dev` 
 - The `TOOL_PROFILE` environment variable selects which tools are enabled.
 - Each tool definition declares a minimum `profile` level.
 - Only tools at or below the active profile are registered on the MCP server.
-- `core` is the default and exposes ~29 tools.
-- `pro` adds manufacturing export tools (pick-and-place, PDF, netlist).
-- `full` adds the controlled `easyeda_api_call` tool for direct EasyEDA API access.
-- `dev` adds runtime probes for debugging (bridge method probing, component inspection).
-- `experimental` enables MCP Apps, Tasks, simulation, autorouter, and AI action plans.
+  The exact counts below are generated from the runtime registry:
+
+<!-- capability-counts:start -->
+
+| Profile        | Registered tools |
+| -------------- | ---------------: |
+| `core`         |               76 |
+| `pro`          |              103 |
+| `full`         |              128 |
+| `dev`          |              133 |
+| `experimental` |              133 |
+
+<!-- capability-counts:end -->
+
+- `core` is the default high-confidence workflow surface.
+- `pro` adds manufacturing exports, compound workflows, autorouting, and offline SPICE verification.
+- `full` adds the controlled `easyeda_api_call` surface and CircuitIR-driven floorplanning.
+- `dev` adds runtime probes for bridge and component diagnostics.
+- `experimental` currently registers the same standard tool set as `dev`; separately gated raw-execution and hot-swap tools are excluded from these counts.
 
 **Security principle:** Privilege escalation is prevented because tool registration happens at startup. Changing the active profile requires a server restart.
 
@@ -121,7 +135,7 @@ Tools are organized into hierarchical profiles: `core` < `pro` < `full` < `dev` 
 
 ### 3.1 `confirmWrite` Gate
 
-All tools that can mutate design state (schematic, PCB, exports) declare `confirmWrite: true` in their definition.
+Tools that can mutate EasyEDA project/design state declare `confirmWrite: true` in their definition. Export tools that only create files under `ARTIFACT_DIR` are classified separately as artifact writes and do not use the design-mutation confirmation gate.
 
 At runtime, the `ToolRegistry.registerAllOnServer()` wrapper:
 
@@ -140,15 +154,44 @@ Mutation tools also support a registry-level write transaction flow through `wri
 
 The safe sequence for agents is: plan → preview → user confirmation → apply with `confirmWrite=true` → verify with read-only checks.
 
+### Agent schematic write safety loop
+
+Agents that author schematics should not treat a successful write call as proof that the electrical intent is correct. Use this loop for placement and connectivity:
+
+1. Read placement context with `easyeda_schematic_sheet_info` and existing design state with `easyeda_schematic_components` / `easyeda_schematic_nets`.
+2. Choose parts with `easyeda_schematic_search_device` and check normalized `pin_count` / `symbol_type` before selecting a symbol.
+3. Preview placement with `easyeda_schematic_place_component` using `dryRun=true` and `checkPlacementCollision=true`. Review `placement_guard.warnings` and `nearby_components` before applying.
+4. Apply the placement only after explicit confirmation with `confirmWrite=true`. Set `verifyAfterWrite=true` to read back component count and surface whether read-back verification was available.
+5. After wiring/net assignment, verify connectivity with `easyeda_schematic_validate_netlist` and, when appropriate, `easyeda_semantic_erc_validate` before continuing to board or export workflows.
+
+`dryRun=true` does not mutate the design. It returns the requested placement preview and optional collision warning data. `verifyAfterWrite=true` performs a read-back pass after the write and reports component-count delta evidence. These checks are guardrails, not a substitute for final human design review.
+
 **Risk tiers:**
 
-| Risk Level | Tool Type                      | Examples                                                              | confirmWrite Required |
-| :--------- | :----------------------------- | :-------------------------------------------------------------------- | :-------------------- |
-| **Low**    | Read-only, diagnostics         | `easyeda_health_check`, `easyeda_schematic_nets`                      | No                    |
-| **Medium** | Schematic writes               | `easyeda_schematic_place_component`, `easyeda_schematic_add_wire`     | Yes                   |
-| **High**   | PCB writes, exports, API calls | `easyeda_pcb_add_track`, `easyeda_export_gerbers`, `easyeda_api_call` | Yes                   |
+| Effect class            | Examples                                                     | Local `confirmWrite`          | Remote Relay approval                              |
+| :---------------------- | :----------------------------------------------------------- | :---------------------------- | :------------------------------------------------- |
+| Read-only               | `easyeda_health_check`, `easyeda_schematic_nets`             | No                            | No after authentication and pairing                |
+| Design mutation         | `easyeda_schematic_place_component`, `easyeda_pcb_add_track` | Yes                           | Yes                                                |
+| Artifact write          | `easyeda_export_gerbers`, `easyeda_export_pdf`               | No; the design is not mutated | Yes, with `export` risk and `easyeda.export` scope |
+| Controlled API mutation | mutating `easyeda_api_call` paths                            | Yes                           | Strong approval according to the resolved risk     |
 
-### 3.2 Structured Error Handling
+### 3.2 Explicit side-effect classification
+
+Tool metadata distinguishes the operation's effect from its UI/documentation group:
+
+- `read-only`: no persistent project or filesystem change;
+- `design-mutation`: changes EasyEDA project state and requires `confirmWrite=true`;
+- `artifact-write`: creates a file inside the configured artifact directory but does not mutate the design;
+- `local-state-write`: changes local cache/database state;
+- `external-action`: triggers a state change outside the local project.
+
+Legacy tool definitions without an explicit `sideEffect` retain fail-safe behavior: `confirmWrite=true`
+implies `design-mutation`; otherwise they default to `read-only`. Remote Relay authorization uses the
+resolved side effect rather than the broad tool group, so read-only reports in the `export` group are
+not mislabeled as manufacturing exports. Actual file exporters remain `export` risk and require a
+bound human approval before relay dispatch.
+
+### 3.3 Structured Error Handling
 
 All tools return structured errors with machine-readable codes:
 
@@ -160,7 +203,7 @@ All tools return structured errors with machine-readable codes:
 | `ERR_TOOL_NOT_FOUND`         | Tool name does not match a registered tool       |
 | `ERR_INVALID_INPUT`          | Zod schema validation failed on input parameters |
 
-### 3.3 Tool Registration Uniqueness
+### 3.4 Tool Registration Uniqueness
 
 The `ToolRegistry` enforces unique tool names at registration time — duplicate registration throws an error, preventing tool shadowing or override attacks.
 
@@ -188,8 +231,8 @@ The `ToolRegistry` enforces unique tool names at registration time — duplicate
 **Origin validation (CORS):**
 
 - Loopback mode: accepts loopback `http://` / `https://` origins with or without explicit ports, `null`, and the legacy `CORS_ORIGIN` value.
-- Non-loopback mode: requires an explicit `ALLOWED_ORIGINS` allowlist (comma-separated). Wildcard (`*`) disables origin checking and should only be used behind a trusted gateway.
-- Requests without an `Origin` header (non-browser clients) are allowed, but the `Host` header is still validated.
+- Non-loopback mode: requires an explicit comma-separated `ALLOWED_ORIGINS` allowlist. Wildcard (`*`) is rejected at startup.
+- Requests without an `Origin` header (non-browser clients) pass origin validation, but they still require OAuth authentication on every non-loopback deployment; the `Host` header is also validated.
 - Unknown origins receive `403 Origin not allowed`.
 - DNS rebinding protection validates the `Host` header in both loopback and non-loopback modes. Loopback binds only accept loopback hostnames/IPs.
 - CORS preflight is handled after origin validation but before OAuth token validation, so browser preflight can succeed without weakening authenticated routes.
@@ -229,7 +272,7 @@ The `ToolRegistry` enforces unique tool names at registration time — duplicate
 **Reconnect backoff:**
 
 - Exponential backoff: 1 s → 2 s → 4 s → 8 s → 16 s → 30 s (capped).
-- Max attempts configurable via `BRIDGE_RECONNECT_MAX_ATTEMPTS` (default 0 = infinite).
+- Reconnect attempts continue while the server remains active; no max-attempt environment control is exposed.
 
 ---
 
@@ -239,15 +282,15 @@ The `ToolRegistry` enforces unique tool names at registration time — duplicate
 
 All sensitive credentials are read from environment variables at startup:
 
-| Category    | Variables                                    |
-| :---------- | :------------------------------------------- |
-| AI provider | `AI_API_KEY`                                 |
-| JLCPCB      | `JLCPCB_CLIENT_ID`, `JLCPCB_CLIENT_SECRET`   |
-| LCSC        | `LCSC_API_KEY`, `LCSC_API_SECRET`            |
-| Mouser      | `MOUSER_API_KEY`                             |
-| DigiKey     | `DIGIKEY_CLIENT_ID`, `DIGIKEY_CLIENT_SECRET` |
-| Bridge      | `BRIDGE_TOKEN`                               |
-| OAuth       | (derived from JWKS token, not stored in env) |
+| Category                  | Variables                                                             |
+| :------------------------ | :-------------------------------------------------------------------- |
+| Reserved AI configuration | None — `AI_API_KEY` is accepted for compatibility but is not consumed |
+| JLCPCB                    | `JLCPCB_CLIENT_ID`, `JLCPCB_CLIENT_SECRET`                            |
+| LCSC                      | `LCSC_API_KEY`                                                        |
+| Mouser                    | `MOUSER_API_KEY`                                                      |
+| DigiKey                   | `DIGIKEY_CLIENT_ID`, `DIGIKEY_CLIENT_SECRET`                          |
+| Bridge                    | `BRIDGE_TOKEN`                                                        |
+| OAuth                     | (derived from JWKS token, not stored in env)                          |
 
 ### 5.2 Log Redaction
 
@@ -275,21 +318,21 @@ The Zod schema in `src/config/env.ts` validates all environment variables at sta
 
 Every unsafe configuration override has a safe default. The following table documents each override, its risk, and when it is appropriate:
 
-| Variable                    | Safe Default  | Unsafe Override                | Risk                                            | When Appropriate                            |
-| :-------------------------- | :------------ | :----------------------------- | :---------------------------------------------- | :------------------------------------------ |
-| `HTTP_HOST`                 | `127.0.0.1`   | Non-loopback (e.g., `0.0.0.0`) | **High** — exposes server to network            | Remote deployment behind auth/reverse proxy |
-| `OAUTH_ENABLED`             | `false`       | `true`                         | **Medium** — required for non-loopback          | Remote HTTP access with proper IdP          |
-| `BRIDGE_RAW_EXEC_ENABLED`   | `false`       | `true`                         | **Critical** — enables raw JavaScript execution | Development/testing only                    |
-| `BRIDGE_TOKEN`              | `''`          | Set to a shared secret         | **Medium** — enables bridge pairing             | Non-loopback bridge connections             |
-| `EASYEDA_DEV_BRIDGE`        | `false`       | `true`                         | **Medium** — enables dev bridge features        | Development only                            |
-| `HTTP_AUTH_DISABLED`        | `false`       | `true`                         | **High** — disables all HTTP auth               | Non-production loopback development only    |
-| `NODE_ENV`                  | `development` | `production`                   | **Medium** — enables production safety checks   | Production deployment                       |
-| `JLCPCB_ENABLE_ORDERING`    | `false`       | `true`                         | **High** — enables ordering via API             | When JLCPCB ordering is needed              |
-| `AI_ALLOW_DESIGN_MUTATIONS` | `false`       | `true`                         | **High** — allows AI to modify designs          | Experimental AI-assisted design             |
-| `MCP_TASKS_ENABLED`         | `false`       | `true`                         | **Medium** — enables MCP task protocol          | When task protocol needed                   |
-| `TOOL_PROFILE`              | `core`        | `full`, `dev`, `experimental`  | **Varies** — grants access to more tools        | When broader tool access is needed          |
-| `CORS_ORIGIN`               | `''`          | Set to an origin               | **Low** — local dev only                        | Legacy CORS configuration                   |
-| `ALLOWED_ORIGINS`           | `''`          | Comma-separated origins        | **Medium** — restricts cross-origin access      | Remote HTTP with known browser clients      |
+`AI_ALLOW_DESIGN_MUTATIONS` and `MCP_TASKS_ENABLED` are reserved compatibility settings. Setting them does not enable AI design mutation or MCP Tasks, and they are therefore not listed as active unsafe overrides.
+
+| Variable                  | Safe Default  | Unsafe Override                | Risk                                                      | When Appropriate                            |
+| :------------------------ | :------------ | :----------------------------- | :-------------------------------------------------------- | :------------------------------------------ |
+| `HTTP_HOST`               | `127.0.0.1`   | Non-loopback (e.g., `0.0.0.0`) | **High** — exposes server to network                      | Remote deployment behind auth/reverse proxy |
+| `OAUTH_ENABLED`           | `false`       | `true`                         | **High** — mandatory for every non-loopback HTTP listener | Remote HTTP access with proper IdP          |
+| `BRIDGE_RAW_EXEC_ENABLED` | `false`       | `true`                         | **Critical** — enables raw JavaScript execution           | Development/testing only                    |
+| `BRIDGE_TOKEN`            | `''`          | Set to a shared secret         | **Medium** — enables bridge pairing                       | Non-loopback bridge connections             |
+| `EASYEDA_DEV_BRIDGE`      | `false`       | `true`                         | **Medium** — enables dev bridge features                  | Development only                            |
+| `HTTP_AUTH_DISABLED`      | `false`       | `true`                         | **High** — disables all HTTP auth                         | Non-production loopback development only    |
+| `NODE_ENV`                | `development` | `production`                   | **Medium** — enables production safety checks             | Production deployment                       |
+| `JLCPCB_ENABLE_ORDERING`  | `false`       | `true`                         | **High** — enables ordering via API                       | When JLCPCB ordering is needed              |
+| `TOOL_PROFILE`            | `core`        | `full`, `dev`, `experimental`  | **Varies** — grants access to more tools                  | When broader tool access is needed          |
+| `CORS_ORIGIN`             | `''`          | Set to an origin               | **Low** — local dev only                                  | Legacy CORS configuration                   |
+| `ALLOWED_ORIGINS`         | `''`          | Comma-separated origins        | **Medium** — restricts cross-origin access                | Remote HTTP with known browser clients      |
 
 ---
 
@@ -299,7 +342,7 @@ Every unsafe configuration override has a safe default. The following table docu
 
 - **Enabled by default** (`JLCSEARCH_ENABLED=true`).
 - Uses a public search API endpoint — no credentials required for basic search.
-- API key/secret can be configured for authenticated access.
+- An API key can be configured for the optional authenticated fallback path.
 
 ### 7.2 JLCPCB
 
@@ -326,14 +369,16 @@ Every unsafe configuration override has a safe default. The following table docu
 
 ## 8. Data at Rest
 
-| Data Type           | Location                                                          | Protection                                      |
-| :------------------ | :---------------------------------------------------------------- | :---------------------------------------------- |
-| Configuration       | `.env` file                                                       | File system permissions; never committed to git |
-| SQLite database     | `SQLITE_PATH` (default `.easyeda-mcp-pro/easyeda-mcp-pro.sqlite`) | File system permissions                         |
-| Artifacts (exports) | `ARTIFACT_DIR` (default `.easyeda-mcp-pro/artifacts/`)            | Path traversal validation at the tool level     |
-| Cache               | `CACHE_DIR` (default `.easyeda-mcp-pro/cache/`)                   | File system permissions                         |
+| Data Type           | Location                                                    | Protection                                      |
+| :------------------ | :---------------------------------------------------------- | :---------------------------------------------- |
+| Configuration       | `.env` file                                                 | File system permissions; never committed to git |
+| SQLite database     | `SQLITE_PATH` (default `<DATA_DIR>/easyeda-mcp-pro.sqlite`) | File system permissions                         |
+| Artifacts (exports) | `ARTIFACT_DIR` (default `<DATA_DIR>/artifacts/`)            | Path traversal validation at the tool level     |
+| Cache               | `CACHE_DIR` (default `<DATA_DIR>/cache/`)                   | File system permissions                         |
 
-Path traversal protection is enforced in all export tools — artifact paths are validated against the configured `ARTIFACT_DIR` before read or write operations.
+`DATA_DIR` defaults to `~/.easyeda-mcp-pro` and is resolved before the subordinate defaults. Setting only `DATA_DIR` therefore relocates all writable state. Explicit subordinate overrides remain independent, including relative paths, and changing the configuration does not migrate existing files.
+
+Path traversal protection is enforced in all export tools — artifact paths are validated against the resolved `ARTIFACT_DIR` before read or write operations, whether that directory was derived from `DATA_DIR` or explicitly configured.
 
 ---
 
@@ -346,6 +391,9 @@ Path traversal protection is enforced in all export tools — artifact paths are
 - The release workflow has elevated permissions scoped to the specific job.
 - Concurrency limits cancel in-progress runs on the same branch/tag.
 - CodeQL analysis runs on every push and PR (security-extended + security-and-quality queries).
+- Repository-owned Semgrep rules run on staged files locally and in a full CI scan; trusted CI events upload SARIF to code scanning.
+- The Snyk GitHub App scans pull requests, while an authenticated high-severity Snyk Open Source scan runs at pre-push.
+- SonarQube Cloud remains the pull-request quality gate; SonarQube for IDE Connected Mode provides editor-time feedback.
 - Socket.dev scans every PR for dependency vulnerabilities.
 
 ### 9.2 Dependency Management
@@ -359,7 +407,7 @@ Path traversal protection is enforced in all export tools — artifact paths are
 ### 9.3 Branch Protection
 
 - `main` requires PR approval (minimum 1 reviewer).
-- Status checks must pass: `quality (24)`, `quality (25)`, `codeql`.
+- Status checks must pass: `quality (24)` and CodeQL analysis.
 - Branches must be up to date before merging.
 - Linear history enforced (squash or rebase merge).
 
@@ -479,7 +527,7 @@ Path traversal protection is enforced in all export tools — artifact paths are
     - [ ] `OAUTH_ISSUER` — valid IdP issuer URL.
     - [ ] `OAUTH_JWKS_URI` — valid JWKS endpoint.
     - [ ] `OAUTH_AUDIENCE` — expected audience (default `easyeda-mcp-pro`).
-  - [ ] Set `ALLOWED_ORIGINS` if browser-based clients will connect.
+  - [ ] Set an explicit, non-wildcard `ALLOWED_ORIGINS` value for every non-loopback HTTP listener.
   - [ ] Configure `HTTP_RATE_LIMIT_MAX` if the default 100 req/min is too restrictive.
 - [ ] Restart the server and verify:
   - [ ] Server starts without SAFETY errors.
@@ -504,7 +552,7 @@ Path traversal protection is enforced in all export tools — artifact paths are
 
 ### 11.3 Handling Generated Design & Export Files
 
-- [ ] Set `ARTIFACT_DIR` to a dedicated directory (default `.easyeda-mcp-pro/artifacts/`).
+- [ ] Set `DATA_DIR` or `ARTIFACT_DIR` to a dedicated location (`ARTIFACT_DIR` defaults to `<DATA_DIR>/artifacts/`).
 - [ ] Verify that export tools write to the artifact directory.
 - [ ] Verify path traversal protection: a tool call with `../../../etc/passwd` should be rejected.
 - [ ] Clean up the artifact directory periodically (exports are not auto-deleted).
@@ -521,7 +569,7 @@ Path traversal protection is enforced in all export tools — artifact paths are
 - [ ] Verify safe config:
   - [ ] `BRIDGE_RAW_EXEC_ENABLED=false`.
   - [ ] `JLCPCB_ENABLE_ORDERING` → requires `JLCPCB_MODE=approved_api`.
-  - [ ] `HTTP_HOST` is loopback OR OAuth is enabled.
+  - [ ] `HTTP_HOST` is loopback OR OAuth is enabled with JWKS, issuer, audience, and a non-wildcard origin allowlist.
   - [ ] `HTTP_AUTH_DISABLED` is `false` for production and for any non-loopback HTTP.
 - [ ] Run full CI gate locally:
   - [ ] `pnpm install --frozen-lockfile`

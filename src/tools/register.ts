@@ -2,15 +2,25 @@ import { type EnvConfig } from '../config/env.js';
 import { registerBoardTools } from './L1_board.js';
 import { registerBomCoreTools } from './L1_bom_core.js';
 import { registerBomSourcingTools } from './L1_bom_sourcing.js';
+import { registerCatalogTools } from './L1_catalog.js';
+import { registerDesignRulesTools } from './L1_design_rules.js';
 import { registerDiagnosticsCore } from './L0_diagnostics_core.js';
 import { registerDiagnosticsApi } from './L0_diagnostics_api.js';
 import { registerEditorTools } from './L1_editor.js';
 import { registerDrcErcTools } from './L1_drc_erc.js';
 import { registerExportTools } from './L1_export.js';
 import { registerPcbConstraintTools } from './L1_pcb_constraints.js';
+import { registerPcbReadTools } from './L1_pcb_read.js';
 import { registerPcbWriteTools } from './L1_pcb_write.js';
+import { registerSchematicBatchTools } from './L1_schematic_batch.js';
 import { registerSchematicReadTools } from './L1_schematic_read.js';
 import { registerSchematicWriteTools } from './L1_schematic_write.js';
+import { registerTransactionTools } from './L1_transactions.js';
+import { registerVisualTools } from './L1_visual.js';
+import { registerAutoroutingTools } from './L2_autorouting.js';
+import { registerSimulationTools } from './L2_simulation.js';
+import { registerSchematicLayoutTools } from './L2_schematic_layout.js';
+import { registerWorkflowTools } from './L2_workflows.js';
 import { type ToolRegistry } from './registry.js';
 
 export function registerBuiltinTools(registry: ToolRegistry, config: EnvConfig): void {
@@ -19,11 +29,21 @@ export function registerBuiltinTools(registry: ToolRegistry, config: EnvConfig):
   registerEditorTools(registry, config);
   registerSchematicReadTools(registry, config);
   registerSchematicWriteTools(registry, config);
+  registerSchematicBatchTools(registry, config);
+  registerTransactionTools(registry, config);
   registerBomCoreTools(registry, config);
   registerBomSourcingTools(registry, config);
   registerDrcErcTools(registry, config);
   registerBoardTools(registry, config);
+  registerPcbReadTools(registry, config);
   registerPcbConstraintTools(registry, config);
   registerPcbWriteTools(registry, config);
   registerExportTools(registry, config);
+  registerVisualTools(registry, config);
+  registerCatalogTools(registry, config);
+  registerDesignRulesTools(registry, config);
+  registerWorkflowTools(registry, config);
+  registerSchematicLayoutTools(registry, config);
+  registerAutoroutingTools(registry, config);
+  registerSimulationTools(registry, config);
 }

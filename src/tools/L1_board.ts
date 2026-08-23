@@ -2,6 +2,13 @@ import { z } from 'zod';
 import { type ToolDefinition, type ToolContext } from './types.js';
 import { type EnvConfig } from '../config/env.js';
 
+function readBoardFeatureCount(
+  data: Record<string, number | undefined> | null,
+  key: string,
+): number {
+  return data?.[key] ?? 0;
+}
+
 function registerBoardTools(
   registry: { register: (def: ToolDefinition) => void },
   _config: EnvConfig,
@@ -37,6 +44,7 @@ function registerBoardTools(
       ),
       total: z.number().int().nonnegative(),
       not_available: z.boolean().optional(),
+      error: z.string().optional(),
     }),
     handler: async (ctx: ToolContext, params: unknown) => {
       const { projectId } = params as { projectId: string };
@@ -104,7 +112,9 @@ function registerBoardTools(
           copper_weight_oz: z.number().nonnegative().optional(),
         }),
       ),
+      data_source: z.enum(['physical_stackup', 'copper_layer_count_only']).optional(),
       not_available: z.boolean().optional(),
+      error: z.string().optional(),
     }),
     handler: async (ctx: ToolContext, params: unknown) => {
       const { projectId } = params as { projectId: string };
@@ -113,6 +123,8 @@ function registerBoardTools(
         const data = result as {
           totalLayers?: number;
           boardThicknessMm?: number;
+          available?: boolean;
+          source?: 'physical_stackup' | 'copper_layer_count_only';
           layers?: Array<{
             name?: string;
             type?: string;
@@ -134,6 +146,12 @@ function registerBoardTools(
             dielectric_constant: l.dielectricConstant,
             copper_weight_oz: l.copperWeightOz,
           })),
+          data_source: data.source,
+          not_available: data.available === false ? true : undefined,
+          error:
+            data.available === false
+              ? 'Physical PCB stackup details are unavailable; only the copper-layer count was verified.'
+              : undefined,
         };
       } catch (err) {
         return {
@@ -171,7 +189,9 @@ function registerBoardTools(
       shape: z.string().optional(),
       mounting_hole_count: z.number().int().nonnegative(),
       area_mm2: z.number().nonnegative().optional(),
+      has_outline: z.boolean(),
       not_available: z.boolean().optional(),
+      error: z.string().optional(),
     }),
     handler: async (ctx: ToolContext, params: unknown) => {
       const { projectId } = params as { projectId: string };
@@ -183,7 +203,10 @@ function registerBoardTools(
           shape?: string;
           mountingHoleCount?: number;
           areaMm2?: number;
+          hasOutline?: boolean;
         } | null;
+        const hasOutline =
+          data?.hasOutline ?? ((data?.widthMm ?? 0) > 0 && (data?.heightMm ?? 0) > 0);
         return {
           project_id: projectId,
           width_mm: data?.widthMm,
@@ -191,11 +214,15 @@ function registerBoardTools(
           shape: data?.shape,
           mounting_hole_count: data?.mountingHoleCount ?? 0,
           area_mm2: data?.areaMm2,
+          has_outline: hasOutline,
+          not_available: hasOutline ? undefined : true,
+          error: hasOutline ? undefined : 'No board outline was found in the active PCB document.',
         };
       } catch (err) {
         return {
           project_id: projectId,
           mounting_hole_count: 0,
+          has_outline: false,
           not_available: true,
           error: err instanceof Error ? err.message : String(err),
         };
@@ -206,7 +233,9 @@ function registerBoardTools(
   registry.register({
     name: 'easyeda_board_features',
     title: 'Get board features',
-    description: 'Get counts of board features including vias, tracks, copper zones, and pads.',
+    description:
+      'Get counts of board features. zones counts copper Pour boundaries only; native Fill and ' +
+      'Region primitives are reported separately as fills and regions.',
     profile: 'core',
     evidence: ['official-docs'],
     risk: 'low',
@@ -225,6 +254,8 @@ function registerBoardTools(
       vias: z.number().int().nonnegative(),
       tracks: z.number().int().nonnegative(),
       zones: z.number().int().nonnegative(),
+      fills: z.number().int().nonnegative(),
+      regions: z.number().int().nonnegative(),
       pads: z.number().int().nonnegative(),
       components: z.number().int().nonnegative().optional(),
       not_available: z.boolean().optional(),
@@ -237,6 +268,8 @@ function registerBoardTools(
           vias?: number;
           tracks?: number;
           zones?: number;
+          fills?: number;
+          regions?: number;
           pads?: number;
           components?: number;
         } | null;
@@ -245,6 +278,8 @@ function registerBoardTools(
           vias: data?.vias ?? 0,
           tracks: data?.tracks ?? 0,
           zones: data?.zones ?? 0,
+          fills: readBoardFeatureCount(data, 'fills'),
+          regions: readBoardFeatureCount(data, 'regions'),
           pads: data?.pads ?? 0,
           components: data?.components,
         };
@@ -254,6 +289,8 @@ function registerBoardTools(
           vias: 0,
           tracks: 0,
           zones: 0,
+          fills: 0,
+          regions: 0,
           pads: 0,
           not_available: true,
           error: err instanceof Error ? err.message : String(err),

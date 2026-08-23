@@ -182,6 +182,71 @@ describe('generateBomQualityReport', () => {
     expect(report.summary.lowStockCount).toBe(0);
   });
 
+  it('surfaces rate-limited supplier status without crashing the report', async () => {
+    const adapters = mockAdapters({
+      mouser: {
+        queryPart: vi.fn().mockResolvedValue({
+          supplier: 'mouser',
+          status: 'rate_limited',
+          found: false,
+          lifecycle: 'unknown',
+          stock: 0,
+          queriedAt: '2026-06-11T21:00:01.000Z',
+          source: 'mouser:search-api',
+          cacheAgeSeconds: 0,
+          fromCache: false,
+          confidence: 'low',
+          reason: 'rate limit exceeded',
+          statusCode: 429,
+        }),
+      } as any,
+    });
+
+    const report = await generateBomQualityReport(
+      'bom-1',
+      [entry({ reference: 'U2', mpn: 'OPA123' })],
+      adapters,
+    );
+
+    expect(report.hasSupplierErrors).toBe(true);
+    expect(report.summary.rateLimitedCount).toBe(1);
+    const issue = report.entries[0]!.issues.find((i) => i.type === 'rate_limited');
+    expect(issue).toBeDefined();
+    expect(issue!.details?.statusCode).toBe(429);
+    expect(report.entries[0]!.supplierData[0]!.source).toBe('mouser:search-api');
+  });
+
+  it('surfaces unauthorized supplier status with source provenance', async () => {
+    const adapters = mockAdapters({
+      digikey: {
+        queryPart: vi.fn().mockResolvedValue({
+          supplier: 'digikey',
+          status: 'unauthorized',
+          found: false,
+          lifecycle: 'unknown',
+          stock: 0,
+          queriedAt: '2026-06-11T21:00:01.000Z',
+          source: 'digikey:product-search-api',
+          cacheAgeSeconds: 0,
+          fromCache: false,
+          confidence: 'low',
+          reason: 'credentials rejected',
+          statusCode: 401,
+        }),
+      } as any,
+    });
+
+    const report = await generateBomQualityReport(
+      'bom-1',
+      [entry({ reference: 'U3', mpn: 'ATMEGA328P' })],
+      adapters,
+    );
+
+    expect(report.hasSupplierErrors).toBe(true);
+    expect(report.summary.unauthorizedCount).toBe(1);
+    expect(report.entries[0]!.issues.some((i) => i.type === 'unauthorized')).toBe(true);
+  });
+
   it('sets hasSupplierErrors when an adapter returns low confidence', async () => {
     const adapters = mockAdapters({
       lcsc: {
@@ -221,6 +286,127 @@ describe('generateBomQualityReport', () => {
     expect(report.summary.totalIssues).toBeGreaterThanOrEqual(2);
   });
 
+  it('adds component quality score and drop-in alternate candidates', async () => {
+    const adapters = mockAdapters({
+      lcsc: {
+        queryPart: vi.fn().mockResolvedValue(
+          activeResult({
+            supplier: 'lcsc',
+            lcsc: 'C12345',
+            mpn: 'RC0805FR-0710KL',
+            manufacturer: 'Yageo',
+            description: '10K resistor 0805 1%',
+            stock: 5000,
+            unitPrice: 0.002,
+            currency: 'USD',
+            source: 'lcsc:jlcsearch-or-official-api',
+            cacheAgeSeconds: 0,
+            fromCache: false,
+          }),
+        ),
+      } as any,
+    });
+
+    const report = await generateBomQualityReport(
+      'bom-1',
+      [entry({ reference: 'R10', footprint: 'RES-0805', lcsc: 'C12345', manufacturer: 'Yageo' })],
+      adapters,
+    );
+
+    const quality = report.entries[0]!.componentQuality;
+    expect(quality.score).toBeGreaterThanOrEqual(70);
+    expect(quality.risk).not.toBe('critical');
+    expect(quality.recommendedAction).toBe('accept');
+    expect(quality.alternates[0]).toMatchObject({
+      supplier: 'lcsc',
+      compatibility: 'drop_in',
+    });
+    expect(quality.alternates[0]!.reasons.length).toBeGreaterThan(0);
+  });
+
+  it('flags stale vendor data and requires review for stale alternates', async () => {
+    const staleAge = 10 * 24 * 60 * 60;
+    const adapters = mockAdapters({
+      lcsc: {
+        queryPart: vi.fn().mockResolvedValue(
+          activeResult({
+            supplier: 'lcsc',
+            lcsc: 'C12345',
+            mpn: 'RC0805FR-0710KL',
+            manufacturer: 'Yageo',
+            description: '10K resistor 0805 1%',
+            stock: 5000,
+            cacheAgeSeconds: staleAge,
+            fromCache: true,
+          }),
+        ),
+      } as any,
+    });
+
+    const report = await generateBomQualityReport(
+      'bom-1',
+      [entry({ reference: 'R10', footprint: 'RES-0805', lcsc: 'C12345', manufacturer: 'Yageo' })],
+      adapters,
+    );
+
+    expect(report.summary.staleVendorDataCount).toBe(1);
+    expect(report.entries[0]!.componentQuality.dimensions.freshness.risk).toBe('high');
+    expect(report.entries[0]!.componentQuality.alternates[0]!.compatibility).toBe(
+      'review_required',
+    );
+    expect(report.entries[0]!.componentQuality.alternates[0]!.caveats).toContain(
+      'Supplier data is stale and should be refreshed.',
+    );
+  });
+
+  it('flags package mismatch as unsafe substitution caveat', async () => {
+    const adapters = mockAdapters({
+      mouser: {
+        queryPart: vi.fn().mockResolvedValue({
+          supplier: 'mouser',
+          status: 'found',
+          found: true,
+          mpn: 'ALT-0603',
+          manufacturer: 'AltCo',
+          description: '10K resistor 0603 1%',
+          lifecycle: 'active',
+          stock: 10000,
+          queriedAt: now,
+          source: 'mouser:search-api',
+          cacheAgeSeconds: 0,
+          fromCache: false,
+          confidence: 'high',
+        }),
+      } as any,
+      digikey: { queryPart: vi.fn().mockResolvedValue(null) } as any,
+    });
+
+    const report = await generateBomQualityReport(
+      'bom-1',
+      [entry({ reference: 'R11', footprint: 'RES-0805', mpn: 'CRCW080510K0' })],
+      adapters,
+    );
+
+    expect(report.summary.packageMismatchCount).toBe(1);
+    const alternate = report.entries[0]!.componentQuality.alternates[0]!;
+    expect(alternate.compatibility).toBe('unsafe');
+    expect(
+      alternate.caveats.some((caveat) => caveat.includes('Package appears incompatible')),
+    ).toBe(true);
+  });
+
+  it('flags missing vendor data and no safe alternates', async () => {
+    const report = await generateBomQualityReport(
+      'bom-1',
+      [entry({ reference: 'U99', lcsc: undefined, mpn: undefined, manufacturer: undefined })],
+      mockAdapters(),
+    );
+
+    expect(report.summary.missingVendorDataCount).toBe(1);
+    expect(report.summary.noSafeAlternateCount).toBe(1);
+    expect(report.entries[0]!.componentQuality.recommendedAction).toBe('insufficient_data');
+  });
+
   it('respects config.requireMpn = false', async () => {
     const report = await generateBomQualityReport(
       'bom-1',
@@ -257,6 +443,6 @@ describe('generateBomQualityReport', () => {
     expect(report.summary.lowStockCount).toBe(1);
     expect(report.summary.missingMpnCount).toBe(1);
     expect(report.summary.missingFootprintCount).toBe(1);
-    expect(report.summary.totalIssues).toBe(3);
+    expect(report.summary.totalIssues).toBeGreaterThanOrEqual(3);
   });
 });

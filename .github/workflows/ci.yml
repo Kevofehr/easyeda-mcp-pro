@@ -16,25 +16,37 @@ env:
 
 jobs:
   quality:
+    # Keep this context stable because main branch protection requires `quality (24)`.
+    name: quality (24)
     if: github.repository_owner == 'oaslananka' || github.repository_owner == 'oaslananka-ops' || github.repository_owner == 'Kevofehr'
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node-version: ['24']
 
     steps:
       # actions/checkout v6.0.3
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
       # pnpm/action-setup v6.0.8
       - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093
+        with:
+          version: '11.5.1'
       # actions/setup-node v6.4.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
-          node-version: ${{ matrix.node-version }}
-          cache: pnpm
+          node-version: '24.18.0'
 
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm audit --audit-level low
+          package-manager-cache: false
+      - name: Verify runtime pin parity
+        run: node scripts/check-runtime-pins.mjs
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Verify runtime policy
+        run: pnpm runtime:check
+      - name: Validate Codecov configuration
+        run: pnpm validate:codecov
+      - name: Run dependency audit
+        id: dependency_audit
+        run: pnpm security:audit
       - run: pnpm peers check
       - run: pnpm format:check
       - run: pnpm typecheck
@@ -42,15 +54,238 @@ jobs:
       - run: pnpm lint
       - run: pnpm lint:tools
       - run: pnpm verify:tool-coverage
-      - run: pnpm test
-      - run: pnpm test:coverage
-      - run: pnpm build
-      - run: pnpm check:metadata
-      - run: pnpm build:extension
+      - name: Run server tests with coverage and JUnit output
+        id: server_coverage
+        run: pnpm test:coverage:ci
+      - name: Validate server CI reports
+        id: server_reports
+        if: ${{ !cancelled() && steps.server_coverage.outcome == 'success' }}
+        run: node scripts/validate-ci-reports.mjs --coverage coverage/lcov.info --junit reports/server.junit.xml
+      - name: Run extension tests with coverage and JUnit output
+        id: extension_coverage
+        if: ${{ !cancelled() && steps.server_coverage.outcome != 'skipped' }}
+        run: pnpm test:extension:ci
+      - name: Validate extension CI reports
+        id: extension_reports
+        if: ${{ !cancelled() && steps.extension_coverage.outcome == 'success' }}
+        run: node scripts/validate-ci-reports.mjs --coverage easyeda-bridge-extension/coverage/lcov.info --junit reports/extension.junit.xml
+      - name: Install SHA-256 verified Codecov CLI
+        id: codecov_cli
+        if: ${{ !cancelled() && (steps.server_reports.outcome == 'success' || steps.extension_reports.outcome == 'success') }}
+        run: node scripts/install-codecov-cli.mjs --output "${RUNNER_TEMP}/codecov-cli/codecovcli"
+      - name: Upload server coverage to Codecov (trusted)
+        id: server_coverage_upload_trusted
+        if: ${{ !cancelled() && steps.codecov_cli.outcome == 'success' && steps.server_reports.outcome == 'success' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) }}
+        uses: codecov/codecov-action@cddd853df119a48c5be31a973f8cd97e12e35e16
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          binary: ${{ runner.temp }}/codecov-cli/codecovcli
+          files: coverage/lcov.info
+          flags: server
+          name: server-coverage
+          report_type: coverage
+          disable_search: true
+          fail_ci_if_error: true
+      - name: Upload server coverage to Codecov (tokenless fork)
+        id: server_coverage_upload_tokenless
+        if: ${{ !cancelled() && steps.codecov_cli.outcome == 'success' && steps.server_reports.outcome == 'success' && github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') }}
+        uses: codecov/codecov-action@cddd853df119a48c5be31a973f8cd97e12e35e16
+        with:
+          binary: ${{ runner.temp }}/codecov-cli/codecovcli
+          files: coverage/lcov.info
+          flags: server
+          name: server-coverage-tokenless
+          report_type: coverage
+          disable_search: true
+          fail_ci_if_error: true
+      - name: Upload extension coverage to Codecov (trusted)
+        id: extension_coverage_upload_trusted
+        if: ${{ !cancelled() && steps.codecov_cli.outcome == 'success' && steps.extension_reports.outcome == 'success' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) }}
+        uses: codecov/codecov-action@cddd853df119a48c5be31a973f8cd97e12e35e16
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          binary: ${{ runner.temp }}/codecov-cli/codecovcli
+          files: easyeda-bridge-extension/coverage/lcov.info
+          flags: extension
+          name: extension-coverage
+          report_type: coverage
+          disable_search: true
+          fail_ci_if_error: true
+      - name: Upload extension coverage to Codecov (tokenless fork)
+        id: extension_coverage_upload_tokenless
+        if: ${{ !cancelled() && steps.codecov_cli.outcome == 'success' && steps.extension_reports.outcome == 'success' && github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') }}
+        uses: codecov/codecov-action@cddd853df119a48c5be31a973f8cd97e12e35e16
+        with:
+          binary: ${{ runner.temp }}/codecov-cli/codecovcli
+          files: easyeda-bridge-extension/coverage/lcov.info
+          flags: extension
+          name: extension-coverage-tokenless
+          report_type: coverage
+          disable_search: true
+          fail_ci_if_error: true
+      - name: Upload server test results to Codecov
+        id: server_test_results_upload
+        if: ${{ !cancelled() && steps.codecov_cli.outcome == 'success' && steps.server_reports.outcome == 'success' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) }}
+        uses: codecov/codecov-action@cddd853df119a48c5be31a973f8cd97e12e35e16
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          binary: ${{ runner.temp }}/codecov-cli/codecovcli
+          files: reports/server.junit.xml
+          flags: server-tests
+          name: server-test-results
+          report_type: test_results
+          disable_search: true
+          fail_ci_if_error: true
+      - name: Upload extension test results to Codecov
+        id: extension_test_results_upload
+        if: ${{ !cancelled() && steps.codecov_cli.outcome == 'success' && steps.extension_reports.outcome == 'success' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) }}
+        uses: codecov/codecov-action@cddd853df119a48c5be31a973f8cd97e12e35e16
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          binary: ${{ runner.temp }}/codecov-cli/codecovcli
+          files: reports/extension.junit.xml
+          flags: extension-tests
+          name: extension-test-results
+          report_type: test_results
+          disable_search: true
+          fail_ci_if_error: true
+      - name: Summarize quality report pipeline
+        if: ${{ always() }}
+        env:
+          DEPENDENCY_AUDIT_OUTCOME: ${{ steps.dependency_audit.outcome }}
+          SERVER_COVERAGE_OUTCOME: ${{ steps.server_coverage.outcome }}
+          SERVER_REPORTS_OUTCOME: ${{ steps.server_reports.outcome }}
+          EXTENSION_COVERAGE_OUTCOME: ${{ steps.extension_coverage.outcome }}
+          EXTENSION_REPORTS_OUTCOME: ${{ steps.extension_reports.outcome }}
+          CODECOV_CLI_OUTCOME: ${{ steps.codecov_cli.outcome }}
+          SERVER_COVERAGE_UPLOAD_TRUSTED_OUTCOME: ${{ steps.server_coverage_upload_trusted.outcome }}
+          SERVER_COVERAGE_UPLOAD_TOKENLESS_OUTCOME: ${{ steps.server_coverage_upload_tokenless.outcome }}
+          EXTENSION_COVERAGE_UPLOAD_TRUSTED_OUTCOME: ${{ steps.extension_coverage_upload_trusted.outcome }}
+          EXTENSION_COVERAGE_UPLOAD_TOKENLESS_OUTCOME: ${{ steps.extension_coverage_upload_tokenless.outcome }}
+          SERVER_TEST_RESULTS_UPLOAD_OUTCOME: ${{ steps.server_test_results_upload.outcome }}
+          EXTENSION_TEST_RESULTS_UPLOAD_OUTCOME: ${{ steps.extension_test_results_upload.outcome }}
+        run: |
+          {
+            echo '### Coverage pipeline diagnosis'
+            echo
+            echo '| Stage | Outcome |'
+            echo '| --- | --- |'
+            echo "| dependency audit | ${DEPENDENCY_AUDIT_OUTCOME:-skipped} |"
+            echo "| server coverage | ${SERVER_COVERAGE_OUTCOME:-skipped} |"
+            echo "| server report validation | ${SERVER_REPORTS_OUTCOME:-skipped} |"
+            echo "| extension coverage | ${EXTENSION_COVERAGE_OUTCOME:-skipped} |"
+            echo "| extension report validation | ${EXTENSION_REPORTS_OUTCOME:-skipped} |"
+            echo "| Codecov CLI | ${CODECOV_CLI_OUTCOME:-skipped} |"
+            echo "| server Codecov coverage upload (trusted) | ${SERVER_COVERAGE_UPLOAD_TRUSTED_OUTCOME:-skipped} |"
+            echo "| server Codecov coverage upload (tokenless) | ${SERVER_COVERAGE_UPLOAD_TOKENLESS_OUTCOME:-skipped} |"
+            echo "| extension Codecov coverage upload (trusted) | ${EXTENSION_COVERAGE_UPLOAD_TRUSTED_OUTCOME:-skipped} |"
+            echo "| extension Codecov coverage upload (tokenless) | ${EXTENSION_COVERAGE_UPLOAD_TOKENLESS_OUTCOME:-skipped} |"
+            echo "| server Codecov test-results upload | ${SERVER_TEST_RESULTS_UPLOAD_OUTCOME:-skipped} |"
+            echo "| extension Codecov test-results upload | ${EXTENSION_TEST_RESULTS_UPLOAD_OUTCOME:-skipped} |"
+            echo
+
+            primary='none in the tracked audit/coverage pipeline'
+            if [[ "${DEPENDENCY_AUDIT_OUTCOME:-skipped}" == 'failure' ]]; then
+              primary='dependency audit failed; coverage and dependent report uploads were skipped'
+            elif [[ "${SERVER_COVERAGE_OUTCOME:-skipped}" == 'skipped' ]]; then
+              primary='a required pre-coverage step failed; server and extension coverage were skipped'
+            elif [[ "${SERVER_COVERAGE_OUTCOME:-skipped}" == 'failure' ]]; then
+              primary='server coverage generation failed; server report validation and upload were skipped'
+            elif [[ "${SERVER_REPORTS_OUTCOME:-skipped}" == 'failure' ]]; then
+              primary='server coverage command succeeded but server report validation failed'
+            elif [[ "${EXTENSION_COVERAGE_OUTCOME:-skipped}" == 'failure' ]]; then
+              primary='extension coverage generation failed; extension report validation and upload were skipped'
+            elif [[ "${EXTENSION_REPORTS_OUTCOME:-skipped}" == 'failure' ]]; then
+              primary='extension coverage command succeeded but extension report validation failed'
+            elif [[ "${CODECOV_CLI_OUTCOME:-skipped}" == 'failure' ]]; then
+              primary='Codecov CLI installation failed; report uploads were skipped'
+            elif [[ "${SERVER_COVERAGE_UPLOAD_TRUSTED_OUTCOME:-skipped}" == 'failure' || "${SERVER_COVERAGE_UPLOAD_TOKENLESS_OUTCOME:-skipped}" == 'failure' ]]; then
+              primary='server Codecov upload failed'
+            elif [[ "${EXTENSION_COVERAGE_UPLOAD_TRUSTED_OUTCOME:-skipped}" == 'failure' || "${EXTENSION_COVERAGE_UPLOAD_TOKENLESS_OUTCOME:-skipped}" == 'failure' ]]; then
+              primary='extension Codecov upload failed'
+            elif [[ "${SERVER_TEST_RESULTS_UPLOAD_OUTCOME:-skipped}" == 'failure' ]]; then
+              primary='server Codecov test-results upload failed'
+            elif [[ "${EXTENSION_TEST_RESULTS_UPLOAD_OUTCOME:-skipped}" == 'failure' ]]; then
+              primary='extension Codecov test-results upload failed'
+            fi
+            echo "**Primary failure:** ${primary}."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - run: pnpm package:prepare
+      - name: Scan source and generated outputs for secret-like material
+        run: pnpm security:secrets
+      - run: pnpm check:extension-size
       - run: pnpm verify:extension
+      - name: Pack PR test package
+        if: github.event_name == 'pull_request'
+        run: |
+          mkdir -p artifacts
+          npm pack --pack-destination artifacts
+      - name: Upload PR test artifact
+        if: github.event_name == 'pull_request'
+        # actions/upload-artifact v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: easyeda-mcp-pro-pr-${{ github.event.pull_request.number }}
+          path: |
+            artifacts/*.tgz
+            easyeda-bridge-extension.eext
+            easyeda-bridge-extension.checksums.json
+            easyeda-bridge-extension/dist/index.js
+          if-no-files-found: error
       - run: pnpm generate:tools-doc
       - run: git diff --exit-code docs/reference/tools.md
       - run: pnpm docs:build
+      - name: Build Docker image
+        run: docker build -t easyeda-mcp-pro:ci .
+      - name: Verify Docker loopback, fail-closed, and published-port networking
+        run: node scripts/e2e/docker-network-smoke.mjs --image easyeda-mcp-pro:ci
+
+  test-matrix:
+    # Lean build + unit-test coverage across the supported platforms.
+    # The heavy `quality` job (docker smoke, docs, coverage) stays on Ubuntu;
+    # this job runs the pinned Node runtime on Linux, Windows, and macOS so
+    # path-separator and file-handling regressions in the CLI/extension
+    # packaging get caught without duplicating the whole quality pipeline.
+    if: github.repository_owner == 'oaslananka' || github.repository_owner == 'oaslananka-ops' || github.repository_owner == 'Kevofehr'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            node-version: '24.18.0'
+          - os: windows-latest
+            node-version: '24.18.0'
+          - os: macos-26
+            node-version: '24.18.0'
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      # actions/checkout v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      # pnpm/action-setup v6.0.8
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093
+        with:
+          version: '11.5.1'
+      # actions/setup-node v6.4.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: ${{ matrix.node-version }}
+
+          package-manager-cache: false
+      - name: Verify runtime pin parity
+        run: node scripts/check-runtime-pins.mjs
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Verify runtime policy
+        run: pnpm runtime:check
+      - run: pnpm typecheck
+      - run: pnpm typecheck:extension
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm build:extension
+      - name: Packed artifact install and doctor
+        run: node scripts/e2e/packed-install-doctor.mjs
 
   codeql:
     if: (github.repository_owner == 'oaslananka' || github.repository_owner == 'oaslananka-ops' || github.repository_owner == 'Kevofehr') && (github.event_name == 'push' || github.event_name == 'pull_request')
@@ -61,16 +296,24 @@ jobs:
 
     steps:
       # actions/checkout v6.0.3
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
       # pnpm/action-setup v6.0.8
       - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093
+        with:
+          version: '11.5.1'
       # actions/setup-node v6.4.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
-          node-version: '24'
-          cache: pnpm
+          node-version: '24.18.0'
 
-      - run: pnpm install --frozen-lockfile
+          package-manager-cache: false
+      - name: Verify runtime pin parity
+        run: node scripts/check-runtime-pins.mjs
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Verify runtime policy
+        run: pnpm runtime:check
 
       - name: Initialize CodeQL
         # github/codeql-action/init v4.36.2

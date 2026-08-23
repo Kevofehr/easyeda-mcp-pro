@@ -2,23 +2,32 @@
   "name": "easyeda-mcp-pro-bridge",
   "uuid": "e7b9fb543e9a4c2898e30d33e5c9b68a",
   "displayName": "MCP Pro Bridge",
-  "description": "WebSocket bridge for external MCP server connectivity",
-  "version": "0.7.3",
+  "description": "Connect EasyEDA Pro to MCP clients for schematic and PCB inspection, BOM, DRC/ERC, exports, and AI-assisted hardware review.",
+  "version": "0.99.6",
   "publisher": "oaslananka",
   "engines": {
-    "eda": "^2.0.0"
+    "eda": "^3.0.0"
   },
   "license": "MIT",
   "categories": "Other",
   "keywords": [
     "mcp",
+    "ai",
     "bridge",
-    "websocket"
+    "schematic",
+    "pcb",
+    "bom",
+    "drc",
+    "erc",
+    "export",
+    "automation"
   ],
   "images": {
     "logo": "./images/logo.png"
   },
-  "activationEvents": {},
+  "activationEvents": {
+    "onStartupFinished": true
+  },
   "entry": "./dist/index",
   "allowExternalInteraction": true,
   "dependentExtensions": {},
@@ -39,9 +48,14 @@
             "registerFn": "disconnect"
           },
           {
-            "id": "ToggleAutoConnect",
-            "title": "Auto-Connect: ON/OFF",
-            "registerFn": "toggleAutoConnect"
+            "id": "EnableAutoConnect",
+            "title": "Enable Auto-Connect",
+            "registerFn": "enableAutoConnect"
+          },
+          {
+            "id": "DisableAutoConnect",
+            "title": "Disable Auto-Connect",
+            "registerFn": "disableAutoConnect"
           },
           {
             "id": "Status",
@@ -77,5 +91,11 @@
         ]
       }
     ]
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/oaslananka/easyeda-mcp-pro"
+  },
+  "homepage": "https://github.com/oaslananka/easyeda-mcp-pro#readme",
+  "bugs": "https://github.com/oaslananka/easyeda-mcp-pro/issues"
 }

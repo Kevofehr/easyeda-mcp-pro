@@ -12,9 +12,19 @@ The AI client (e.g. Claude Desktop or Cursor) displays an error: `"Failed to sta
 
 ### Resolving Node.js and Command Conflicts:
 
-1. **Wrong Node.js version**: Ensure your system path uses **Node.js >= 24**. Run `node -v` to verify.
+1. **Wrong runtime**: Use Node.js **24.x**. A source checkout is pinned to Node.js **24.18.0** and pnpm **11.5.1**; pnpm is not required for an installed package or production runtime. Run `npx easyeda-mcp-pro doctor --fix` first, and use `node scripts/check-runtime.mjs --require-pnpm` only for repository workflows.
 2. **Global `npx` not found**: If `npx` is not in the system PATH, specify the absolute path to `node` and pointing to `dist/index.js` instead.
 3. **Execution Policy (Windows)**: In Windows PowerShell, if scripts are disabled, use `.cmd` commands or run from command prompt (`cmd`).
+4. **Restore the pinned local toolchain**:
+
+   ```bash
+   nvm install 24.18.0
+   nvm use 24.18.0
+   corepack enable
+   corepack prepare pnpm@11.5.1 --activate
+   ```
+
+5. **Stale user service**: `doctor --fix` inspects `easyeda-mcp-pro.service`. If its absolute `ExecStart` Node path no longer exists, stop/disable that unit and rerun MCP client setup under Node 24.18.0 instead of leaving `Restart=on-failure` in a restart loop.
 
 ---
 
@@ -32,7 +42,17 @@ The AI client (e.g. Claude Desktop or Cursor) displays an error: `"Failed to sta
    ```bash
    npx easyeda-mcp-pro doctor
    ```
+   Add `--fix` to print a suggested-fixes section with the exact command or setting to
+   change for each detected failure (Node version, missing pnpm, invalid env, missing
+   build artifacts, unreachable bridge port, missing vendor credentials). `doctor --fix`
+   never modifies files — it only prints guidance.
 4. **Port Scan Configuration**: If you changed ports, ensure the server env var `BRIDGE_PORT` or `BRIDGE_PORT_SCAN` aligns with the extension's configured port (default is `49620`).
+5. **Extension Version Mismatch**: `easyeda_health_check` and `easyeda_run_self_test` report
+   `extension_version_mismatch: true` (and the mismatched versions) when the connected
+   bridge extension's version differs from the installed `easyeda-mcp-pro` package
+   version. Update the extension in EasyEDA Pro (Settings → Extensions → Extension
+   Manager) or reinstall `easyeda-bridge-extension.eext` from a matching release.
+6. **Read the connection phase**: Newer bridge builds append the last failed phase to the offline message. In particular, `SYS_WebSocket.register() ... did not invoke its open callback` means the EasyEDA runtime accepted the preferred registration API but never reported a usable socket. The extension closes that handle without sending and retries the same port through `SYS_WebSocket.create()` and then browser WebSocket. If no alternate API exists, the phase remains visible instead of being collapsed into the generic `no local server found` message. Other phase messages distinguish an unavailable socket API, an open timeout, a socket that opened without returning bridge `hello`, an early close, and an explicit socket error.
 
 ---
 
@@ -52,21 +72,64 @@ Verify that your credentials are set in the `.env` file at the directory where y
 
 ---
 
-## 4. HTTP Transport Blocked by OAuth Safety Check
+## 4. Remote Relay Misconfiguration
+
+### Symptom:
+
+You set `MCP_BRIDGE_BACKEND=remote_relay`, but remote tool calls fail before reaching EasyEDA Pro or report that no relay session is available.
+
+### Checklist:
+
+Run:
+
+```bash
+npx easyeda-mcp-pro doctor --fix
+```
+
+The doctor output includes a `Remote backend:` line. For Remote Relay mode it checks whether:
+
+- `TRANSPORT=http` is configured, so `/remote/*` relay endpoints are mounted.
+- `MCP_REMOTE_SESSION_ID` is configured, or each MCP request is expected to pass `remoteSessionId`.
+- `OAUTH_ENABLED=true` is set for production identity propagation.
+- `HTTP_AUTH_DISABLED=true` is not accidentally used outside loopback-only development.
+
+`remote_relay` remains experimental. Use the default `MCP_BRIDGE_BACKEND=local_bridge` unless you are explicitly testing a paired Remote Relay session.
+
+---
+
+## 5. HTTP Transport Blocked by OAuth Safety Check
 
 ### Symptom:
 
 The server exits on startup when using `TRANSPORT=http` with the error:
-`"Production safety check failed: Non-loopback HTTP host requires OAUTH_ENABLED=true."`
+`"SAFETY: HTTP_HOST is not a loopback address but OAUTH_ENABLED is false."`
 
 ### Rationale & Solution:
 
 For security, binding the server to an external network interface (e.g. `HTTP_HOST=0.0.0.0`) without active authentication is blocked to prevent exposing your local EasyEDA instance to the public web.
-To bypass this locally, bind to `127.0.0.1`. For production deployments, configure `OAUTH_ENABLED=true` and provide a valid JWKS endpoint (`OAUTH_JWKS_URI`).
+For local development, bind to `127.0.0.1`. Every non-loopback deployment—including development and test processes—must configure `OAUTH_ENABLED=true`, `OAUTH_JWKS_URI`, `OAUTH_ISSUER`, `OAUTH_AUDIENCE`, and an explicit non-wildcard `ALLOWED_ORIGINS` value.
 
 ---
 
-## 5. Release Pipeline / NPM Token Failures
+## 6. Stale MCP Client Config
+
+### Symptom:
+
+Running `npx easyeda-mcp-pro setup <client>` (or `setup all`) prints "Stale entry
+detected and replaced" for a client instead of "Existing entry was already up to date."
+
+### Rationale & Solution:
+
+This means the client's MCP config file already had an `easyeda-mcp-pro` entry that
+differed from the one `setup` just wrote (for example, an entry from an older version
+that pointed at a local build path, or one missing a `TOOL_PROFILE` env var). The lines
+under "Stale entry detected and replaced" list exactly what changed
+(`command`, `args`, or `env`). `setup` always writes the correct current entry, so no
+further action is needed — restart the client to pick up the corrected config.
+
+---
+
+## 7. Release Pipeline / NPM Token Failures
 
 ### Symptom:
 

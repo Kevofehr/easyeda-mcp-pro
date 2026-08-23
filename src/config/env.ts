@@ -1,22 +1,53 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { z } from 'zod';
 
-function envBoolean() {
-  return z.preprocess((val) => {
-    if (typeof val === 'string') {
-      const lower = val.toLowerCase().trim();
-      if (lower === 'false' || lower === '0' || lower === '') return false;
-      return true;
-    }
-    return val;
-  }, z.boolean());
+const DEFAULT_DATA_DIR = join(homedir(), '.easyeda-mcp-pro');
+
+type PathJoiner = (...paths: string[]) => string;
+
+type StoragePathConfig = {
+  DATA_DIR: string;
+  SQLITE_PATH?: string;
+  ARTIFACT_DIR?: string;
+  CACHE_DIR?: string;
+};
+
+export function deriveStoragePaths<T extends StoragePathConfig>(
+  config: T,
+  joinPath: PathJoiner = join,
+): T & { SQLITE_PATH: string; ARTIFACT_DIR: string; CACHE_DIR: string } {
+  return {
+    ...config,
+    SQLITE_PATH: config.SQLITE_PATH ?? joinPath(config.DATA_DIR, 'easyeda-mcp-pro.sqlite'),
+    ARTIFACT_DIR: config.ARTIFACT_DIR ?? joinPath(config.DATA_DIR, 'artifacts'),
+    CACHE_DIR: config.CACHE_DIR ?? joinPath(config.DATA_DIR, 'cache'),
+  };
 }
 
-export const EnvSchema = z.object({
+const STRICT_BOOLEAN_MESSAGE = 'Invalid boolean literal. Expected one of: true, false, 1, or 0.';
+
+function envBoolean() {
+  return z.union([z.boolean(), z.string()]).transform((value, ctx) => {
+    if (typeof value === 'boolean') return value;
+
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1') return true;
+    if (normalized === 'false' || normalized === '0') return false;
+
+    ctx.addIssue({ code: 'custom', message: STRICT_BOOLEAN_MESSAGE });
+    return z.NEVER;
+  });
+}
+
+const EnvObjectSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent']).default('info'),
   TOOL_PROFILE: z.enum(['core', 'pro', 'full', 'dev', 'experimental']).default('core'),
   TOOL_SCOPES: z.string().default(''),
   MCP_PROTOCOL_VERSION: z.string().default('2025-11-25'),
+  MCP_BRIDGE_BACKEND: z.enum(['local_bridge', 'remote_relay']).default('local_bridge'),
+  MCP_REMOTE_SESSION_ID: z.string().default(''),
 
   TRANSPORT: z.enum(['stdio', 'http']).default('stdio'),
   HTTP_HOST: z.string().default('127.0.0.1'),
@@ -36,17 +67,23 @@ export const EnvSchema = z.object({
   BRIDGE_PORT_SCAN: z.string().default('49620-49629'),
   BRIDGE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(15000),
   BRIDGE_HEARTBEAT_MS: z.coerce.number().int().min(1000).max(60000).default(10000),
-  BRIDGE_RECONNECT_MAX_ATTEMPTS: z.coerce.number().int().min(0).max(100).default(0),
   BRIDGE_WAIT_FOR_EDA_MS: z.coerce.number().int().min(0).max(60000).default(30000),
   BRIDGE_MAX_PAYLOAD_SIZE: z.coerce.number().int().min(1024).max(10485760).default(1048576),
   BRIDGE_TOKEN: z.string().default(''),
   EASYEDA_DEV_BRIDGE: envBoolean().default(false),
   BRIDGE_RAW_EXEC_ENABLED: envBoolean().default(false),
+  // Dev-only dispatcher hot swap: push a freshly built extension dispatcher
+  // bundle over the bridge without re-importing the .eext. Remote code
+  // execution by design — refused in production, mirrors BRIDGE_RAW_EXEC_ENABLED.
+  BRIDGE_HOT_SWAP_ENABLED: envBoolean().default(false),
+  // Path to the dispatcher bundle to watch/push (easyeda-bridge-extension/dist/dispatcher.js).
+  BRIDGE_HOT_SWAP_WATCH: z.string().default(''),
+  BRIDGE_HOT_SWAP_CHUNK_BYTES: z.coerce.number().int().min(4096).max(1048576).default(65536),
 
-  DATA_DIR: z.string().default('.easyeda-mcp-pro'),
-  SQLITE_PATH: z.string().default('.easyeda-mcp-pro/easyeda-mcp-pro.sqlite'),
-  ARTIFACT_DIR: z.string().default('.easyeda-mcp-pro/artifacts'),
-  CACHE_DIR: z.string().default('.easyeda-mcp-pro/cache'),
+  DATA_DIR: z.string().default(DEFAULT_DATA_DIR),
+  SQLITE_PATH: z.string().optional(),
+  ARTIFACT_DIR: z.string().optional(),
+  CACHE_DIR: z.string().optional(),
 
   AI_PROVIDER: z.enum(['none', 'anthropic', 'openai', 'openrouter', 'local']).default('none'),
   AI_MODEL: z.string().default(''),
@@ -60,12 +97,14 @@ export const EnvSchema = z.object({
   JLCPCB_CLIENT_SECRET: z.string().default(''),
   JLCPCB_API_BASE_URL: z.string().default('https://api.jlcpcb.com'),
   JLCPCB_ENABLE_ORDERING: envBoolean().default(false),
-  JLCPCB_DEFAULT_CURRENCY: z.enum(['USD', 'CNY']).default('USD'),
 
   JLCSEARCH_ENABLED: envBoolean().default(true),
   JLCSEARCH_BASE_URL: z.string().default('https://jlcsearch.tscircuit.com'),
   LCSC_API_KEY: z.string().default(''),
-  LCSC_API_SECRET: z.string().default(''),
+
+  KEYLESS_SOURCING_ENABLED: envBoolean().default(true),
+  SOURCING_CACHE_TTL_SECONDS: z.coerce.number().int().min(0).max(604800).default(21600),
+  VENDOR_MIN_REQUEST_INTERVAL_MS: z.coerce.number().int().min(0).max(10000).default(150),
 
   MOUSER_ENABLED: envBoolean().default(false),
   MOUSER_API_KEY: z.string().default(''),
@@ -90,6 +129,12 @@ export const EnvSchema = z.object({
   TRACE_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(1.0),
 });
 
+export function getEnvironmentVariableNames(): readonly string[] {
+  return Object.freeze(Object.keys(EnvObjectSchema.shape));
+}
+
+export const EnvSchema = EnvObjectSchema.transform((config) => deriveStoragePaths(config));
+
 export type EnvConfig = z.infer<typeof EnvSchema>;
 
 const PROJECT_VAR_PREFIXES = [
@@ -112,6 +157,9 @@ const PROJECT_VAR_PREFIXES = [
   'JLCPCB_',
   'JLCSEARCH_',
   'LCSC_',
+  'KEYLESS_',
+  'SOURCING_',
+  'VENDOR_',
   'MOUSER_',
   'DIGIKEY_',
   'OAUTH_',
@@ -120,7 +168,7 @@ const PROJECT_VAR_PREFIXES = [
 ];
 
 export function detectUnknownEnvVars(env: Record<string, string | undefined>): string[] {
-  const knownKeys = new Set(Object.keys(EnvSchema.shape));
+  const knownKeys = new Set(Object.keys(EnvObjectSchema.shape));
   const warnings: string[] = [];
   for (const key of Object.keys(env)) {
     if (knownKeys.has(key)) continue;
@@ -154,20 +202,68 @@ export function loadEnvConfig(): EnvConfig {
   return result.data;
 }
 
-/** Check whether HTTP_HOST refers to a loopback address. */
+/** Check whether a host refers to a loopback address. */
 function isLoopbackHost(host: string): boolean {
   return host === '127.0.0.1' || host === 'localhost' || host === '::1';
 }
 
-export function validateSafeConfig(config: EnvConfig): void {
-  // ── CORS / origin policy ─────────────────────────────────
-  if (config.TRANSPORT === 'http' && !isLoopbackHost(config.HTTP_HOST) && !config.ALLOWED_ORIGINS) {
-    // Logger not yet initialized — env config is loaded first
-    console.error(
+export function getBridgePairingConfigIssue(config: EnvConfig): string | undefined {
+  if (isLoopbackHost(config.BRIDGE_HOST) || config.BRIDGE_TOKEN) return undefined;
+  return (
+    'SAFETY: BRIDGE_HOST is not a loopback address but BRIDGE_TOKEN is empty. ' +
+    'Non-loopback bridge listeners require a pairing token. ' +
+    'Set BRIDGE_TOKEN to a strong secret or use BRIDGE_HOST=127.0.0.1 for local operation.'
+  );
+}
+
+export function getHttpSecurityConfigIssues(config: EnvConfig): string[] {
+  if (config.TRANSPORT !== 'http' || isLoopbackHost(config.HTTP_HOST)) return [];
+
+  const issues: string[] = [];
+  const allowedOrigins = config.ALLOWED_ORIGINS.split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  if (allowedOrigins.length === 0) {
+    issues.push(
       'SAFETY: HTTP_HOST is not a loopback address but ALLOWED_ORIGINS is empty. ' +
-        'Non-loopback HTTP deployments must declare an explicit origin allowlist. ' +
-        'Set ALLOWED_ORIGINS to a comma-separated list of allowed origins or use HTTP_HOST=127.0.0.1.',
+        'Non-loopback HTTP requires an explicit comma-separated origin allowlist.',
     );
+  } else if (allowedOrigins.includes('*')) {
+    issues.push(
+      'SAFETY: ALLOWED_ORIGINS=* is not allowed for non-loopback HTTP. ' +
+        'Configure an explicit comma-separated origin allowlist. CORS is not an authentication boundary.',
+    );
+  }
+
+  if (!config.OAUTH_ENABLED) {
+    issues.push(
+      'SAFETY: HTTP_HOST is not a loopback address but OAUTH_ENABLED is false. ' +
+        'Every non-loopback HTTP deployment requires OAuth/JWKS authentication, regardless of NODE_ENV. ' +
+        'Set OAUTH_ENABLED=true with OAUTH_JWKS_URI, OAUTH_ISSUER, and OAUTH_AUDIENCE, ' +
+        'or use HTTP_HOST=127.0.0.1 for local development.',
+    );
+  } else {
+    const missing: string[] = [];
+    if (!config.OAUTH_JWKS_URI) missing.push('OAUTH_JWKS_URI');
+    if (!config.OAUTH_ISSUER) missing.push('OAUTH_ISSUER');
+    if (!config.OAUTH_AUDIENCE) missing.push('OAUTH_AUDIENCE');
+    if (missing.length > 0) {
+      issues.push(
+        `SAFETY: OAuth is enabled for non-loopback HTTP but required variables are missing: ${missing.join(', ')}. ` +
+          'Set every listed OAuth variable or use HTTP_HOST=127.0.0.1 for local development.',
+      );
+    }
+  }
+
+  return issues;
+}
+
+export function validateSafeConfig(config: EnvConfig): void {
+  // ── Bridge pairing policy ────────────────────────────────
+  const bridgePairingIssue = getBridgePairingConfigIssue(config);
+  if (bridgePairingIssue) {
+    console.error(bridgePairingIssue);
     process.exit(1);
   }
 
@@ -182,20 +278,11 @@ export function validateSafeConfig(config: EnvConfig): void {
     }
   }
 
-  // ── OAuth/JWKS validation ─────────────────────────────────
-  if (config.OAUTH_ENABLED && !isLoopbackHost(config.HTTP_HOST)) {
-    const missing: string[] = [];
-    if (!config.OAUTH_JWKS_URI) missing.push('OAUTH_JWKS_URI');
-    if (!config.OAUTH_ISSUER) missing.push('OAUTH_ISSUER');
-    if (!config.OAUTH_AUDIENCE) missing.push('OAUTH_AUDIENCE');
-    if (missing.length > 0) {
-      // Logger not yet initialized — env config is loaded first
-      console.error(
-        `SAFETY: OAuth is enabled for non-loopback HTTP but required variables are missing: ${missing.join(', ')}. ` +
-          'Set all required OAuth variables or use HTTP_HOST=127.0.0.1 for local development.',
-      );
-      process.exit(1);
-    }
+  // ── Non-loopback HTTP authentication policy ───────────────
+  const httpSecurityIssues = getHttpSecurityConfigIssues(config);
+  if (httpSecurityIssues.length > 0) {
+    for (const issue of httpSecurityIssues) console.error(issue);
+    process.exit(1);
   }
 
   // No weak-token fallback: if OAuth is enabled, JWKS must be configured
@@ -211,17 +298,14 @@ export function validateSafeConfig(config: EnvConfig): void {
 
   // ── NODE_ENV production checks ──────────────────────────
   if (config.NODE_ENV === 'production') {
-    if (!isLoopbackHost(config.HTTP_HOST) && !config.OAUTH_ENABLED) {
-      // Logger not yet initialized — env config is loaded first
-      console.error(
-        'SAFETY: HTTP_HOST is not localhost but OAUTH_ENABLED is false. ' +
-          'Set OAUTH_ENABLED=true or use HTTP_HOST=127.0.0.1.',
-      );
-      process.exit(1);
-    }
     if (config.BRIDGE_RAW_EXEC_ENABLED) {
       // Logger not yet initialized — env config is loaded first
       console.error('SAFETY: BRIDGE_RAW_EXEC_ENABLED=true is not allowed in production mode.');
+      process.exit(1);
+    }
+    if (config.BRIDGE_HOT_SWAP_ENABLED) {
+      // Logger not yet initialized — env config is loaded first
+      console.error('SAFETY: BRIDGE_HOT_SWAP_ENABLED=true is not allowed in production mode.');
       process.exit(1);
     }
     if (config.JLCPCB_ENABLE_ORDERING && config.JLCPCB_MODE !== 'approved_api') {

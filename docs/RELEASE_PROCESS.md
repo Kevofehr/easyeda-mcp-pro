@@ -1,71 +1,111 @@
 # Release Process
 
-This document details the automated release lifecycle of `easyeda-mcp-pro`. Our delivery pipeline uses **Release Please** to automate version bumps, changelog generation, and NPM registry publications.
-
----
+This document describes how the repository implements the channel, soak, validation, and recovery rules in the authoritative [Release Policy](RELEASE_POLICY.md). The **Release Please PR** workflow automates stable version bumps and changelog PRs; the separate **Publish Release** workflow owns gated immutable release creation and registry publication; numbered release candidates use an explicit manual path that cannot update stable moving tags.
 
 ## 1. Conventional Commits
 
 We enforce the [Conventional Commits specification](https://www.conventionalcommits.org/). Version bumping is determined by the commit prefixes pushed to `main`:
 
-| Commit Prefix                  | SemVer Bump | Description                                                             |
-| :----------------------------- | :---------- | :---------------------------------------------------------------------- |
-| `fix:`                         | **Patch**   | A bug fix (e.g. `fix(bridge): resolve socket memory leak`).             |
-| `feat:`                        | **Minor**   | A new feature (e.g. `feat(schematic): add component placement`).        |
-| `feat!:` or `BREAKING CHANGE:` | **Major**   | A breaking change (e.g. `feat!(transport): change WebSocket protocol`). |
-| `chore:`                       | **None**    | Internal updates, configs, or devDependencies.                          |
-| `docs:`                        | **None**    | Documentation changes.                                                  |
-| `test:`                        | **None**    | Adding/fixing tests.                                                    |
-| `ci:`                          | **None**    | CI/CD configurations.                                                   |
+| Commit prefix                     | SemVer bump | Description                                                               |
+| --------------------------------- | ----------- | ------------------------------------------------------------------------- |
+| `fix:`                            | Patch       | A backwards-compatible bug fix.                                           |
+| `feat:`                           | Minor       | A backwards-compatible feature.                                           |
+| `feat!:` or `BREAKING CHANGE:`    | Major       | A breaking public change with migration and deprecation evidence.         |
+| `chore:`, `docs:`, `test:`, `ci:` | None        | Internal or documentation-only change unless release notes say otherwise. |
 
----
+## 2. Channel mapping
 
-## 2. Release Automation (Release Please)
+| Channel    | Version/tag                                  | npm      | GitHub Release | GHCR                       | MCP Registry |
+| ---------- | -------------------------------------------- | -------- | -------------- | -------------------------- | ------------ |
+| Stable     | `X.Y.Z` / `easyeda-mcp-pro-vX.Y.Z`           | `latest` | non-prerelease | exact, `X.Y`, and `latest` | publish      |
+| Prerelease | `X.Y.Z-rc.N` / `easyeda-mcp-pro-vX.Y.Z-rc.N` | `next`   | prerelease     | exact and `next`           | skip         |
 
-We use **Release Please** to automate our releases. The lifecycle works as follows:
+Release Please remains stable-only (`prerelease: false`). The PR manager uses `skip-github-release: true`, so merging a release PR does not create a tag or GitHub Release until the Publish Release workflow has completed its pre-publication gates. Manual workflow dispatch validates that the supplied tag, requested channel, `package.json` version, public evidence URL, and GitHub Release classification all agree before publication.
+
+## 3. Stable automation
 
 ```mermaid
 graph TD
-    A[Push Conventional Commits to main] --> B[Release Please runs in CI]
-    B --> C{Active Release PR exists?}
-    C -- No --> D[Release Please creates a Release PR]
-    C -- Yes --> E[Release Please updates existing Release PR]
-    F[Maintainer merges Release PR] --> G[Release Please tags commit & creates GitHub Release]
-    G --> H[Release Please workflow runs quality gates & builds extension]
-    H --> I[NPM publish with provenance]
-    I --> J[Upload easyeda-bridge-extension.eext to GitHub Release]
+    A[Conventional commits merge to main] --> B[Release Please PR workflow opens or updates stable release PR]
+    B --> C[Maintainer verifies policy evidence and soak]
+    C --> D[Merge release PR]
+    D --> E[Publish Release detects exact release commit]
+    E --> F[Compatibility and quality gates run against exact commit]
+    F --> G[Build extension, SBOM, and attestations]
+    G --> H[Release Please release-only mode creates immutable tag and GitHub Release]
+    H --> I[Publish npm, assets, MCP Registry, and GHCR]
+    I --> J[Verify registries, docs, and evidence]
 ```
 
-### Flow Details
+The Release Please PR updates `package.json`, `.release-please-manifest.json`, `server.json`, `easyeda-bridge-extension/extension.json`, release-managed TypeScript version constants, plugin metadata, and `CHANGELOG.md`. Do not manually create the normal stable tag. The automated gates finish **before the immutable tag and GitHub Release are created**.
 
-1. **Pull Request Creation**: When changes are merged into `main`, Release Please reads the conventional commits and creates/updates a **Release Pull Request** (e.g., `chore(main): release 0.4.0`). This PR updates `package.json`, `.release-please-manifest.json`, `server.json`, `easyeda-bridge-extension/extension.json`, and appends new release notes to `CHANGELOG.md`.
-2. **Release Execution**: When a maintainer merges the Release PR into `main`:
-   - Release Please tags the merge commit (e.g., `v0.4.0`) and creates a GitHub Release.
-   - The `Release Please` GitHub Actions workflow triggers on the push to `main` and detects the release.
-   - The workflow runs full verification checks, builds the extension package (`easyeda-bridge-extension.eext`), and publishes the package to npm with `--provenance`.
-   - The workflow uploads the built `easyeda-bridge-extension.eext` asset to the newly created GitHub Release.
+## 4. Prerelease automation
 
----
+A prerelease is prepared in an ordinary reviewed candidate PR. The PR sets all release-managed versions to `X.Y.Z-rc.N`, updates release notes, and links the public evidence record. After merge:
 
-## 3. NPM Publishing and Provenance
+```bash
+TAG=easyeda-mcp-pro-vX.Y.Z-rc.N
 
-- **Provenance**: We publish with `--provenance` (enabled via `id-token: write` permission in GitHub Actions). This links the published NPM package to the specific GitHub Actions run and commit that built it, providing a cryptographic guarantee of supply-chain security.
-- **Verification**: The release workflow verifies that the `NPM_TOKEN` secret is configured in the repository before publishing. If the token is missing, the workflow fails with a clear message:
-  `❌ Error: NPM_TOKEN secret is not defined or is empty. Please configure it in your repository secrets.`
+git tag -a "$TAG" -m "$TAG"
+git push origin "$TAG"
+gh release create "$TAG" --verify-tag --prerelease --generate-notes
+gh workflow run publish-release.yml --ref main \
+  -f tag_name="$TAG" \
+  -f release_channel=prerelease \
+  -f evidence_url=https://github.com/oaslananka/easyeda-mcp-pro/issues/NUMBER
+```
 
----
+The Publish Release workflow checks out the exact tag, verifies that the GitHub Release is non-draft and marked prerelease, reruns all gates, publishes npm with `--provenance --tag next`, publishes exact and `next` GHCR tags, uploads the extension, SBOM, and tag-bound portable Sigstore bundle and in-toto provenance asset, and skips the MCP Registry.
 
-## 4. Troubleshooting Failed Releases
+For `1.0.0-rc.N`, the EasyEDA install manifest uses numeric package version `0.99.N` because EasyEDA Pro 3.2.149 rejects SemVer prerelease identifiers in `extension.json`. The extension runtime, npm package, server, tag, and health checks continue to use `1.0.0-rc.N`; stable `1.0.0` remains a monotonic package upgrade from every `0.99.N` candidate. Other prerelease families fail closed until an explicit mapping is reviewed.
 
-If a release workflow fails (e.g., due to network issues, registry timeout, or invalid token):
+Release Please and GitHub Release asset mutations authenticate with the repository-scoped `RELEASE_PLEASE_TOKEN`. This avoids the permission ceiling of a restricted merge integration while keeping npm publication on OIDC Trusted Publishing. The token is not exposed to build, test, npm, MCP Registry, or GHCR steps.
 
-1. **Investigate Logs**: Go to the GitHub Actions tab, select the failed `Release Please` run, and check the logs of the failed step.
-2. **Fix and Re-run**:
-   - If the failure was transient (e.g., NPM registry was down), click **Re-run failed jobs**.
-   - If the failure was due to an NPM token error, update the `NPM_TOKEN` secret in the repository settings and re-run.
-3. **Manual Fallback**: If CI cannot publish and you must publish manually:
-   - Check out the release tag: `git checkout vX.Y.Z`
-   - Install dependencies: `pnpm install --frozen-lockfile`
-   - Build both the server and extension: `pnpm build && pnpm build:extension`
-   - Publish to npm: `npm publish --provenance` (requires local NPM login and permission).
-   - Upload the generated `easyeda-bridge-extension.eext` file manually to the GitHub Release.
+## 5. Release-blocking gates
+
+Before publication begins, `pnpm release:readiness:compatibility` must confirm that at least one live
+EasyEDA record is current for the exact candidate commit. The release workflow runs this command
+after runtime and dependency installation and before the remaining quality gates. Any later change
+under the configured compatibility-sensitive paths makes older evidence stale and blocks both stable
+and prerelease publication until a new disposable-project live run is recorded.
+
+An `unavailable` result is also blocking. It means the candidate cannot be tied safely to Git history
+or valid compatibility evidence; release automation must not reinterpret it as current. Publication
+therefore requires a complete Git checkout even though archive-style source snapshots remain valid
+for ordinary build and test verification.
+
+Both channels must pass:
+
+- supported Node.js and pnpm runtime preflight;
+- dependency audit and peer-dependency checks;
+- Prettier, TypeScript server/extension typechecks, ESLint, tool metadata, and tool coverage checks;
+- server tests and coverage plus extension tests and coverage;
+- generated tool-reference drift check and documentation build;
+- server build, extension build, extension distribution verification, and extension size budgets;
+- Docker loopback, fail-closed, and published-host-port smoke; CodeQL; Semgrep; Sonar; Codecov; dependency review; workflow/container security; and required platform CI checks;
+- SBOM generation, npm provenance, GitHub artifact attestation, and a portable Sigstore bundle and in-toto provenance asset named `<tag>.provenance.sigstore.json` and `<tag>.intoto.jsonl`. The npm path uses npm Trusted Publishing. For first publication, new npm versions use Trusted Publishing without `NPM_TOKEN`; `NPM_TOKEN` is restricted to existing-version dist-tag recovery.
+
+The evidence record must also satisfy the soak and live EasyEDA validation rules in the Release Policy. Automation success alone does not waive those requirements. The full local convenience command is `pnpm release:readiness`; it intentionally fails before the expensive quality sequence when the compatibility evidence is stale.
+
+## 6. Publication and verification
+
+After a successful workflow:
+
+1. verify the npm version and channel dist-tag;
+2. verify GitHub Release draft/prerelease state and required assets;
+3. verify extension checksums, artifact attestations, and the portable Sigstore bundle and in-toto provenance asset;
+4. verify exact and moving GHCR tags point to the expected digest;
+5. verify the MCP Registry only for stable releases;
+6. verify deployed documentation describes the released version and support claims;
+7. require the **Verify published release** workflow step to pass and archive `published-release.json`;
+8. publish the final evidence comment before announcing or closing the tracking issue.
+
+See [Release Verification](RELEASE_VERIFICATION.md) for commands and [Release & CI Runbook](release-ci-runbook.md) for failure recovery.
+
+## 7. Failed releases and emergency publication
+
+For a transient failure, rerun only when the tag, commit, channel, and evidence are unchanged. A code, dependency, generated artifact, or release-metadata change requires a new version; never overwrite an immutable release.
+
+Normal stable releases must use Release Please. A manual stable dispatch is reserved for the Emergency patch procedure in the Release Policy and requires an existing stable-format tag, a non-draft/non-prerelease GitHub Release, and a public evidence URL. The same quality, provenance, and registry checks still run.
+
+If publication partially succeeds, stop promotion claims and follow the rollback/yanking sequence in the Release Policy plus the registry-specific procedures in [Solo-maintainer continuity and release recovery](SOLO_MAINTAINER_RECOVERY.md). Keep immutable tags, SBOMs, checksums, attestations, and the public evidence issue for auditability. Manual recovery runs use the current workflow policy from `main` and then build the immutable requested tag.

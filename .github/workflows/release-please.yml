@@ -1,18 +1,12 @@
 ---
-name: Release Please
+name: Release Please PR
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:
-    inputs:
-      tag_name:
-        description: 'Tag name to publish manually (e.g. easyeda-mcp-pro-v0.4.0)'
-        required: false
-        type: string
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: release-please-pr-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -20,208 +14,24 @@ permissions:
 
 jobs:
   release-please:
-    if: github.repository_owner == 'oaslananka' || github.repository_owner == 'oaslananka-ops'
+    name: Maintain stable release PR
+    if: github.repository_owner == 'oaslananka' || github.repository_owner == 'oaslananka-ops' || github.repository_owner == 'Kevofehr'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      pull-requests: write
-      issues: write
-      id-token: write
-      attestations: write
-    outputs:
-      release_created: ${{ steps.release.outputs.release_created || github.event.inputs.tag_name }}
-      tag_name: ${{ steps.release.outputs.tag_name || github.event.inputs.tag_name }}
+      contents: write # Create and update the release PR branch.
+      pull-requests: write # Create and update the stable release PR.
+      issues: write # Maintain release labels and linked issue metadata.
     steps:
-      # googleapis/release-please-action v5.0.0
-      - name: Run Release Please
-        id: release
-        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7
+      - name: Checkout release metadata
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run Release Please PR manager
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-
-      - name: Set Release Status
-        id: status
-        run: |
-          if [ "${{ steps.release.outputs.release_created }}" = "true" ] || [ -n "${{ github.event.inputs.tag_name }}" ]; then
-            echo "RELEASE_RUN=true" >> $GITHUB_ENV
-            if [ -n "${{ github.event.inputs.tag_name }}" ]; then
-              echo "RELEASE_TAG=${{ github.event.inputs.tag_name }}" >> $GITHUB_ENV
-            else
-              echo "RELEASE_TAG=${{ steps.release.outputs.tag_name }}" >> $GITHUB_ENV
-            fi
-          else
-            echo "RELEASE_RUN=false" >> $GITHUB_ENV
-          fi
-
-      # actions/checkout v4.1.1
-      - name: Checkout Code
-        if: ${{ env.RELEASE_RUN == 'true' }}
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-
-      # pnpm/action-setup v4.0.0
-      - name: Setup pnpm
-        if: ${{ env.RELEASE_RUN == 'true' }}
-        uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093
-
-      # actions/setup-node v4.0.2
-      - name: Setup Node.js
-        if: ${{ env.RELEASE_RUN == 'true' }}
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
-        with:
-          node-version: '24'
-          cache: pnpm
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Install dependencies
-        if: ${{ env.RELEASE_RUN == 'true' }}
-        run: pnpm install --frozen-lockfile
-
-      - name: Verify Quality Gates
-        if: ${{ env.RELEASE_RUN == 'true' }}
-        run: |
-          pnpm audit --audit-level low
-          pnpm peers check
-          pnpm format:check
-          pnpm typecheck
-          pnpm typecheck:extension
-          pnpm lint
-          pnpm lint:tools
-          pnpm verify:tool-coverage
-          pnpm test
-          pnpm test:coverage
-          pnpm generate:tools-doc
-          git diff --exit-code docs/reference/tools.md
-          pnpm check:metadata
-          pnpm docs:build
-
-      - name: Build Projects
-        if: ${{ env.RELEASE_RUN == 'true' }}
-        run: |
-          pnpm build
-          pnpm build:extension
-          pnpm verify:extension
-
-      - name: Generate CycloneDX SBOM
-        if: ${{ env.RELEASE_RUN == 'true' }}
-        run: |
-          npm install --ignore-scripts --no-save --package-lock-only 2>/dev/null || true
-          npx --yes @cyclonedx/cyclonedx-npm --ignore-npm-errors --output-format JSON --output-file sbom.json
-
-      - name: Upload SBOM Artifact
-        if: ${{ env.RELEASE_RUN == 'true' }}
-        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
-        with:
-          name: sbom
-          path: sbom.json
-
-      - name: Attach Build Provenance (SLSA + Sigstore)
-        if: ${{ env.RELEASE_RUN == 'true' }}
-        # actions/attest-build-provenance v2.4.0
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
-        with:
-          subject-path: |
-            dist/**
-            sbom.json
-
-      - name: Verify NPM Token
-        if: ${{ env.RELEASE_RUN == 'true' }}
-        run: |
-          if [ -z "${{ secrets.NPM_TOKEN }}" ]; then
-            echo "❌ Error: NPM_TOKEN secret is not defined or is empty. Please configure it in your repository secrets."
-            exit 1
-          fi
-
-      - name: Publish to npm
-        if: ${{ env.RELEASE_RUN == 'true' }}
-        run: |
-          PKG_NAME=$(node -p "require('./package.json').name")
-          PKG_VERSION=$(node -p "require('./package.json').version")
-          if npm view "${PKG_NAME}@${PKG_VERSION}" version >/dev/null 2>&1; then
-            echo "⚠️ Version ${PKG_VERSION} of ${PKG_NAME} is already published. Skipping publish."
-          else
-            npm publish --provenance
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Upload Assets to Release
-        if: ${{ env.RELEASE_RUN == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "${{ env.RELEASE_TAG }}" easyeda-bridge-extension.eext --clobber
-          gh release upload "${{ env.RELEASE_TAG }}" sbom.json --clobber
-
-      - name: Install mcp-publisher
-        if: ${{ env.RELEASE_RUN == 'true' }}
-        run: |
-          MCP_PUBLISHER_VERSION="v1.7.9"
-          OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-          ARCH="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
-          ASSET="mcp-publisher_${OS}_${ARCH}.tar.gz"
-          BASE="https://github.com/modelcontextprotocol/registry/releases/download"
-          curl -sSLO "${BASE}/${MCP_PUBLISHER_VERSION}/${ASSET}"
-          tar xzf mcp-publisher_*.tar.gz mcp-publisher
-          chmod +x mcp-publisher
-
-      - name: Publish to MCP Registry
-        if: ${{ env.RELEASE_RUN == 'true' }}
-        continue-on-error: true
-        run: |
-          ./mcp-publisher login github-oidc && ./mcp-publisher publish || echo "⚠️ Warning: Failed to publish to MCP Registry. Ensure your repository is registered."
-
-  docker:
-    if: (github.repository_owner == 'oaslananka' || github.repository_owner == 'oaslananka-ops') && needs.release-please.outputs.release_created
-    runs-on: ubuntu-latest
-    needs: release-please
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      # actions/checkout v4.1.1
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Clean version tag
-        id: clean_version
-        run: |
-          RAW_TAG="${{ needs.release-please.outputs.tag_name }}"
-          CLEAN_VER="${RAW_TAG##*v}"
-          echo "version=${CLEAN_VER}" >> $GITHUB_OUTPUT
-          if [[ "$CLEAN_VER" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
-            echo "major_minor=${BASH_REMATCH[1]}.${BASH_REMATCH[2]}" >> $GITHUB_OUTPUT
-          else
-            echo "major_minor=${CLEAN_VER}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Extract metadata for Docker
-        id: meta
-        uses: docker/metadata-action@8e5442c4ef9f78752691e2d8f8d19755c6f78e81 # v5.5.1
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=raw,value=${{ steps.clean_version.outputs.version }}
-            type=raw,value=${{ steps.clean_version.outputs.major_minor }}
-            type=raw,value=latest
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          skip-github-release: true

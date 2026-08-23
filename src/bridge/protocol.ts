@@ -28,6 +28,11 @@ export const BridgeHandshakeSchema = z.object({
   easyedaVersion: z.string().optional(),
   devMode: z.boolean().optional(),
   sessionToken: z.string().optional(),
+  /** Hash of the extension's active dispatcher method list (same algorithm as
+   *  the server's methodRegistryHash) so stale dispatch logic fails loudly. */
+  methodListHash: z.string().optional(),
+  /** Version of the extension loader shell (tracks the .eext import). */
+  loaderVersion: z.string().optional(),
 });
 
 /**
@@ -68,6 +73,17 @@ export const BridgeHelloSchema = z.object({
   // window to this so a non-default BRIDGE_HEARTBEAT_MS never false-drops a
   // healthy link. Optional for backward-compat with pre-1.1.0 servers.
   heartbeatIntervalMs: z.number().int().positive().optional(),
+  /** The server's configured BRIDGE_MAX_PAYLOAD_SIZE, so the extension can self-limit
+   *  binary (Blob/File) results before sending — avoiding a payload-too-large close
+   *  of the whole connection over one oversized response. */
+  maxPayloadSize: z.number().int().positive().optional(),
+  /** Whether this server reassembles `{type:'chunk'}` envelopes, letting the
+   *  extension split payloads larger than maxPayloadSize across frames. */
+  supportsChunking: z.boolean().optional(),
+  /** Aggregate cap for one chunked payload (defaults to 8× maxPayloadSize). */
+  maxAggregatePayloadSize: z.number().int().positive().optional(),
+  /** Whether this server accepts system.hotSwap.* dispatcher pushes (dev only). */
+  hotSwapEnabled: z.boolean().optional(),
 });
 
 /**
@@ -99,11 +115,15 @@ export const BridgeResponseSchema = z.object({
         'METHOD_NOT_ALLOWED',
         'METHOD_NOT_FOUND',
         'NET_NOT_FOUND',
+        'NET_COLLISION',
         'EASYEDA_API_ERROR',
         'TIMEOUT',
         'INVALID_PARAMS',
         'UNAUTHORIZED',
         'DEV_MODE_REQUIRED',
+        'NOT_IMPLEMENTED',
+        'PAYLOAD_TOO_LARGE',
+        'SCHEMATIC_NOT_FOCUSED',
         'UNKNOWN',
       ]),
       message: z.string(),
@@ -122,6 +142,7 @@ export const BridgeResponseSchema = z.object({
 export const BridgeHeartbeatSchema = z.object({
   type: z.literal('heartbeat'),
   timestamp: z.number(),
+  source: z.enum(['server', 'extension']).optional(),
 });
 
 /** Inferred TypeScript type for a hello message. */

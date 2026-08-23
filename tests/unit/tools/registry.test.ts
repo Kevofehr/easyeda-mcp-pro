@@ -1,9 +1,22 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport, McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import { ToolRegistry, ErrorCodes } from '../../../src/tools/registry.js';
+import {
+  ToolRegistry,
+  ErrorCodes,
+  remoteRiskForTool,
+  sideEffectForTool,
+} from '../../../src/tools/registry.js';
 import { type ToolDefinition, type ToolContext } from '../../../src/tools/types.js';
 import { registerBuiltinTools } from '../../../src/tools/register.js';
 import { EnvSchema } from '../../../src/config/env.js';
+import { checkRemoteScope, requiredScopeForRisk } from '../../../src/remote/scope.js';
+import { registeredOutputSchema, writePlanOutputSchema } from '../../../src/tools/transaction.js';
+import {
+  getGlobalMetricsCollector,
+  resetGlobalMetricsCollector,
+} from '../../../src/observability/index.js';
 
 // ── Default test config ───────────────────────────────────────────────────
 
@@ -88,6 +101,7 @@ describe('ToolRegistry', () => {
 
   beforeEach(() => {
     registry = new ToolRegistry();
+    resetGlobalMetricsCollector();
   });
 
   describe('basic operations', () => {
@@ -130,6 +144,77 @@ describe('ToolRegistry', () => {
       registry.register(createMockTool('b', 'pro'));
       const all = registry.getAllTools();
       expect(all).toHaveLength(2);
+    });
+  });
+
+  describe('MCP schema dialect compatibility', () => {
+    it('publishes only MCP-compatible 2020-12/default schema dialects', async () => {
+      const server = new McpServer({ name: 'schema-dialect-test', version: '1.0.0' });
+      const client = new Client({ name: 'schema-dialect-client', version: '1.0.0' });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+      registry.setProfile('dev');
+      registerBuiltinTools(registry, TEST_CONFIG);
+      registry.registerAllOnServer(server, mockContext({ profile: 'dev' }));
+
+      try {
+        await server.connect(serverTransport);
+        await client.connect(clientTransport);
+
+        const listed = await client.listTools();
+        expect(listed.tools).toHaveLength(registry.getEnabledTools().length);
+        expect(listed.tools.length).toBeGreaterThan(0);
+
+        for (const tool of listed.tools) {
+          const inputSchema = tool.inputSchema as Record<string, unknown>;
+          const outputSchema = tool.outputSchema as Record<string, unknown> | undefined;
+
+          const supportedDialects = [undefined, 'https://json-schema.org/draft/2020-12/schema'];
+
+          expect(supportedDialects, `${tool.name} inputSchema dialect`).toContain(
+            inputSchema.$schema,
+          );
+          expect(outputSchema, `${tool.name} outputSchema`).toBeDefined();
+          expect(supportedDialects, `${tool.name} outputSchema dialect`).toContain(
+            outputSchema?.$schema,
+          );
+        }
+      } finally {
+        await Promise.allSettled([client.close(), server.close()]);
+      }
+    });
+  });
+
+  describe('observability instrumentation', () => {
+    it('records successful tool duration through registry wrapper', async () => {
+      registry.register(createMockTool('observed_tool', 'core'));
+      const { server, handlers } = mockMcpServer();
+      registry.registerAllOnServer(server as any, mockContext());
+
+      const response = await handlers.get('observed_tool')!({});
+      const snapshot = getGlobalMetricsCollector().snapshot();
+
+      expect(response.isError).toBeFalsy();
+      expect(snapshot.byCategory.analysis.count).toBe(1);
+      expect(snapshot.byCategory.analysis.ok).toBe(1);
+    });
+
+    it('records failed tool duration through registry wrapper', async () => {
+      registry.register(
+        createMockTool('observed_failure', 'core', {
+          handler: async () => {
+            throw new Error('boom');
+          },
+        }),
+      );
+      const { server, handlers } = mockMcpServer();
+      registry.registerAllOnServer(server as any, mockContext());
+
+      const response = await handlers.get('observed_failure')!({});
+      const snapshot = getGlobalMetricsCollector().snapshot();
+
+      expect(response.isError).toBe(true);
+      expect(snapshot.byCategory.analysis.errors).toBe(1);
     });
   });
 
@@ -190,6 +275,47 @@ describe('ToolRegistry', () => {
       expect(response.isError).toBe(true);
       expect(response.content[0].text).toContain('ERR_CONFIRM_WRITE_REQUIRED');
       expect(response.content[0].text).toContain('confirmWrite=true');
+    });
+
+    it('allows an opt-in apply-mode tool to preview without confirmation but still gates apply', async () => {
+      const handler = vi.fn(
+        async (_ctx, input: { mode?: 'preview' | 'apply'; confirmWrite?: true }) => ({
+          ok: true,
+          mode: input.mode ?? 'preview',
+        }),
+      );
+      const mutableTool = createMockTool('apply_mode_tool', 'core', {
+        confirmWrite: true,
+        confirmationPolicy: 'apply-mode',
+        risk: 'high',
+        inputSchema: z.object({
+          mode: z.enum(['preview', 'apply']).default('preview'),
+          confirmWrite: z.literal(true).optional(),
+        }),
+        outputSchema: z.object({ ok: z.boolean(), mode: z.enum(['preview', 'apply']) }),
+        handler,
+      });
+      registry.register(mutableTool);
+
+      const { server, handlers } = mockMcpServer();
+      registry.registerAllOnServer(server as any, mockContext());
+      const registered = handlers.get('apply_mode_tool');
+      expect(registered).toBeDefined();
+
+      const preview = await registered!({ mode: 'preview' });
+      expect(preview.isError).toBeFalsy();
+      expect(preview.structuredContent).toMatchObject({ ok: true, mode: 'preview' });
+      expect(handler).toHaveBeenCalledTimes(1);
+
+      const blockedApply = await registered!({ mode: 'apply' });
+      expect(blockedApply.isError).toBe(true);
+      expect(blockedApply.content[0].text).toContain(ErrorCodes.CONFIRM_WRITE_REQUIRED);
+      expect(handler).toHaveBeenCalledTimes(1);
+
+      const apply = await registered!({ mode: 'apply', confirmWrite: true });
+      expect(apply.isError).toBeFalsy();
+      expect(apply.structuredContent).toMatchObject({ ok: true, mode: 'apply' });
+      expect(handler).toHaveBeenCalledTimes(2);
     });
 
     it('should allow confirmWrite=true tool when input has confirmWrite: true', async () => {
@@ -288,6 +414,90 @@ describe('ToolRegistry', () => {
 
       const response = await handler!({});
       expect(response.isError).toBeFalsy();
+    });
+  });
+
+  describe('image content', () => {
+    it('appends an image content block when the tool defines imageContent', async () => {
+      const tool = createMockTool('image_tool', 'core', {
+        outputSchema: z.object({ ok: z.boolean(), image_base64: z.string().optional() }),
+        handler: async () => ({ ok: true, image_base64: 'ZmFrZS1wbmctYnl0ZXM=' }),
+        imageContent: (output) =>
+          output.image_base64 ? [{ data: output.image_base64, mimeType: 'image/png' }] : [],
+      });
+      registry.register(tool);
+
+      const { server, handlers } = mockMcpServer();
+      registry.registerAllOnServer(server as any, mockContext());
+
+      const response = await handlers.get('image_tool')!({});
+
+      expect(response.isError).toBeFalsy();
+      expect(response.content).toHaveLength(2);
+      expect(response.content[0]).toMatchObject({ type: 'text' });
+      expect(response.content[1]).toEqual({
+        type: 'image',
+        data: 'ZmFrZS1wbmctYnl0ZXM=',
+        mimeType: 'image/png',
+      });
+    });
+
+    it('omits imageContentOmitFields from structuredContent and the text block once an image block exists', async () => {
+      const tool = createMockTool('deduped_image_tool', 'core', {
+        outputSchema: z.object({
+          ok: z.boolean(),
+          image_base64: z.string().optional(),
+          other: z.string(),
+        }),
+        handler: async () => ({ ok: true, image_base64: 'ZmFrZS1wbmctYnl0ZXM=', other: 'kept' }),
+        imageContent: (output) =>
+          output.image_base64 ? [{ data: output.image_base64, mimeType: 'image/png' }] : [],
+        imageContentOmitFields: ['image_base64'],
+      });
+      registry.register(tool);
+
+      const { server, handlers } = mockMcpServer();
+      registry.registerAllOnServer(server as any, mockContext());
+
+      const response = await handlers.get('deduped_image_tool')!({});
+
+      // The image is still delivered exactly once, as its own content block...
+      expect(response.content).toHaveLength(2);
+      expect(response.content[1]).toEqual({
+        type: 'image',
+        data: 'ZmFrZS1wbmctYnl0ZXM=',
+        mimeType: 'image/png',
+      });
+      // ...but is no longer duplicated into structuredContent or the JSON text block.
+      expect(response.structuredContent).toEqual({ ok: true, other: 'kept' });
+      expect(response.content[0].text).not.toContain('ZmFrZS1wbmctYnl0ZXM=');
+      expect(response.content[0].text).toContain('kept');
+    });
+
+    it('does not add an image block when imageContent returns an empty array', async () => {
+      const tool = createMockTool('no_image_tool', 'core', {
+        outputSchema: z.object({ ok: z.boolean() }),
+        handler: async () => ({ ok: true }),
+        imageContent: () => [],
+      });
+      registry.register(tool);
+
+      const { server, handlers } = mockMcpServer();
+      registry.registerAllOnServer(server as any, mockContext());
+
+      const response = await handlers.get('no_image_tool')!({});
+      expect(response.content).toHaveLength(1);
+    });
+
+    it('does not add an image block for tools that omit imageContent entirely', async () => {
+      const tool = createMockTool('plain_tool', 'core');
+      registry.register(tool);
+
+      const { server, handlers } = mockMcpServer();
+      registry.registerAllOnServer(server as any, mockContext());
+
+      const response = await handlers.get('plain_tool')!({});
+      expect(response.content).toHaveLength(1);
     });
   });
 
@@ -470,6 +680,12 @@ describe('ToolRegistry', () => {
           'export',
           'pcb-constraints',
           'pcb-write',
+          'visual',
+          'catalog',
+          'design-rules',
+          'workflows',
+          'simulation',
+          'project',
         ]).toContain(tool.group);
 
         // profile must be valid
@@ -489,6 +705,118 @@ describe('ToolRegistry', () => {
           expect(['medium', 'high']).toContain(tool.risk);
         }
       }
+    });
+  });
+
+  describe('remote risk policy', () => {
+    it('derives legacy side effects from confirmWrite when metadata is absent', () => {
+      expect(sideEffectForTool(createMockTool('read'))).toBe('read-only');
+      expect(
+        sideEffectForTool(createMockTool('write', 'core', { confirmWrite: true, risk: 'medium' })),
+      ).toBe('design-mutation');
+    });
+
+    it.each([
+      {
+        label: 'high-risk confirmWrite tool',
+        tool: createMockTool('high_write', 'core', { risk: 'high', confirmWrite: true }),
+        expected: 'destructive',
+      },
+      {
+        label: 'medium-risk confirmWrite tool',
+        tool: createMockTool('medium_write', 'core', { risk: 'medium', confirmWrite: true }),
+        expected: 'write',
+      },
+      {
+        label: 'low-risk read tool',
+        tool: createMockTool('low_read', 'core', { risk: 'low', confirmWrite: false }),
+        expected: 'read',
+      },
+      {
+        label: 'high-risk export tool',
+        tool: createMockTool('high_export', 'core', {
+          group: 'export',
+          risk: 'high',
+          confirmWrite: true,
+          sideEffect: 'artifact-write',
+        }),
+        expected: 'export',
+      },
+      {
+        label: 'read-only tool in the export documentation group',
+        tool: createMockTool('read_only_export_group', 'core', {
+          group: 'export',
+          risk: 'low',
+          confirmWrite: false,
+          sideEffect: 'read-only',
+        }),
+        expected: 'read',
+      },
+      {
+        label: 'raw execution tool',
+        tool: createMockTool('easyeda_execute', 'dev', {
+          risk: 'low',
+          confirmWrite: false,
+        }),
+        expected: 'destructive',
+      },
+    ] as const)('classifies $label as $expected', ({ tool, expected }) => {
+      expect(remoteRiskForTool(tool)).toBe(expected);
+    });
+
+    it('enumerates every built-in high-risk tool and classifies non-export tools as destructive', () => {
+      registerBuiltinTools(registry, TEST_CONFIG);
+      const highRiskTools = registry
+        .getAllTools()
+        .filter((tool) => tool.risk === 'high')
+        .sort((left, right) => left.name.localeCompare(right.name));
+
+      expect(highRiskTools.map((tool) => tool.name)).toEqual([
+        'easyeda_api_call',
+        // Local-only PCB primitive writes (src/tools/L1_pcb_write.ts).
+        'easyeda_pcb_add_board_outline',
+        'easyeda_pcb_add_hole',
+        'easyeda_pcb_add_pad',
+        'easyeda_pcb_add_silkscreen_text',
+        'easyeda_pcb_add_solid_region',
+        'easyeda_pcb_add_track',
+        'easyeda_pcb_add_via',
+        'easyeda_pcb_add_zone',
+        'easyeda_pcb_autoroute',
+        'easyeda_pcb_delete_component',
+        'easyeda_pcb_floorplan',
+        // Local-only bulk importers (src/tools/L1_pcb_write.ts).
+        'easyeda_pcb_import_project_file',
+        'easyeda_pcb_import_ses_route',
+        'easyeda_pcb_import_tscircuit_board',
+        'easyeda_pcb_modify_component',
+        'easyeda_pcb_place_component',
+        'easyeda_pcb_place_component_group',
+        'easyeda_pcb_route_path_plan',
+        'easyeda_schematic_batch_write',
+        'easyeda_schematic_layout_autofix_apply',
+      ]);
+
+      for (const tool of highRiskTools) {
+        expect(tool.group).not.toBe('export');
+        expect(remoteRiskForTool(tool), tool.name).toBe('destructive');
+      }
+    });
+
+    it('requires project_admin and rejects write-only identity for high-risk tools', () => {
+      const riskLevel = remoteRiskForTool(
+        createMockTool('high_scope_tool', 'core', { risk: 'high', confirmWrite: true }),
+      );
+
+      expect(requiredScopeForRisk(riskLevel)).toBe('easyeda.project_admin');
+      expect(checkRemoteScope({ userId: 'writer', scopes: ['easyeda.write'] }, riskLevel)).toEqual({
+        ok: false,
+        code: 'SCOPE_MISSING',
+        message: 'Remote tool requires easyeda.project_admin.',
+      });
+      expect(
+        checkRemoteScope({ userId: 'admin', scopes: ['easyeda.project_admin'] }, riskLevel),
+      ).toEqual({ ok: true });
     });
   });
 
@@ -587,5 +915,587 @@ describe('ToolRegistry', () => {
     expect(response.isError).toBe(true);
     expect(response.content[0].text).toContain('Bridge connection failed');
     expect(response.content[0].text).toContain('EasyEDA Pro is not running');
+  });
+});
+
+describe('registered output schema compatibility', () => {
+  it('uses an open object schema for confirmWrite tools to avoid SDK union conversion crashes', () => {
+    const tool = createMockTool('confirm_output_schema', 'core', { confirmWrite: true });
+    const schema = registeredOutputSchema(tool);
+
+    expect(schema.safeParse({ arbitrary: 'tool output' }).success).toBe(true);
+    expect(schema.safeParse({ success: true, transaction: {} }).success).toBe(true);
+  });
+
+  it('keeps transaction plan schema strict for internal validation', () => {
+    expect(writePlanOutputSchema.safeParse({ success: true, transaction: {} }).success).toBe(false);
+  });
+});
+
+describe('ToolRegistry remote relay backend', () => {
+  it('advertises relay session and approval controls in remote MCP tool schemas', async () => {
+    const routeToolRequest = vi.fn(async () => ({
+      ok: true as const,
+      sessionId: 'sess_schema',
+      toolName: 'schematic.getDocument',
+      result: { ok: true },
+      durationMs: 1,
+    }));
+    const domainHandler = vi.fn(async (ctx: ToolContext, input: { query: string }) => {
+      await ctx.bridge.call('schematic.getDocument', input);
+      return { ok: true };
+    });
+    const registry = new ToolRegistry();
+    registry.register(
+      createMockTool('remote_schema_tool', 'core', {
+        inputSchema: z.object({ query: z.string() }),
+        handler: domainHandler as ToolDefinition['handler'],
+      }),
+    );
+
+    let registeredDefinition: { inputSchema: z.ZodType } | undefined;
+    let registeredHandler:
+      ((input: unknown, extra: unknown) => Promise<Record<string, unknown>>) | undefined;
+    registry.registerAllOnServer(
+      {
+        registerTool: (
+          _name: string,
+          definition: { inputSchema: z.ZodType },
+          handler: (input: unknown, extra: unknown) => Promise<Record<string, unknown>>,
+        ) => {
+          registeredDefinition = definition;
+          registeredHandler = handler;
+        },
+      } as any,
+      mockContext({
+        config: {
+          bridgeTimeoutMs: 1000,
+          artifactDir: '.easyeda-mcp-pro/artifacts',
+          bridgeHost: '127.0.0.1',
+          bridgePort: 49620,
+          MCP_BRIDGE_BACKEND: 'remote_relay',
+        },
+        remote: { gateway: { routeToolRequest } as any },
+      }),
+    );
+
+    const parsed = registeredDefinition?.inputSchema.parse({
+      query: 'current',
+      remoteSessionId: 'sess_schema',
+      remoteApprovalId: 'appr_schema',
+    }) as Record<string, unknown>;
+    expect(parsed).toEqual({
+      query: 'current',
+      remoteSessionId: 'sess_schema',
+      remoteApprovalId: 'appr_schema',
+    });
+
+    await registeredHandler?.(parsed, {
+      authInfo: {
+        clientId: 'client-schema',
+        scopes: ['easyeda:read'],
+        extra: { sub: 'user-schema' },
+      },
+    });
+
+    expect(domainHandler).toHaveBeenCalledWith(expect.any(Object), { query: 'current' });
+    expect(routeToolRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'sess_schema',
+        input: { query: 'current' },
+      }),
+    );
+    expect(routeToolRequest.mock.calls[0]?.[0]).not.toHaveProperty('approvalId');
+  });
+
+  it('keeps Remote Relay controls out of strict refined domain schemas', async () => {
+    const domainHandler = vi.fn(async (_ctx, input: { mode: 'preview' | 'apply' }) => ({
+      ok: true,
+      mode: input.mode,
+    }));
+    const strictRefinedSchema = z
+      .object({ mode: z.enum(['preview', 'apply']) })
+      .strict()
+      .refine((value) => value.mode.length > 0);
+    const registry = new ToolRegistry();
+    registry.register(
+      createMockTool('remote_strict_refined', 'core', {
+        inputSchema: strictRefinedSchema,
+        outputSchema: z.object({ ok: z.boolean(), mode: z.enum(['preview', 'apply']) }),
+        handler: domainHandler,
+      }),
+    );
+
+    let registeredInput: z.ZodType | undefined;
+    const { server, handlers } = mockMcpServer();
+    const originalRegister = server.registerTool;
+    server.registerTool = ((name: string, definition: any, handler: any) => {
+      registeredInput = definition.inputSchema;
+      return originalRegister(name, definition, handler);
+    }) as typeof server.registerTool;
+    registry.registerAllOnServer(
+      server as any,
+      mockContext({
+        config: {
+          bridgeTimeoutMs: 1000,
+          artifactDir: '.easyeda-mcp-pro/artifacts',
+          bridgeHost: '127.0.0.1',
+          bridgePort: 49620,
+          MCP_BRIDGE_BACKEND: 'remote_relay',
+        },
+        remote: { gateway: {} as any },
+      }),
+    );
+
+    const wireInput = {
+      mode: 'preview' as const,
+      remoteSessionId: 'sess_strict',
+      remoteApprovalId: 'appr_strict',
+    };
+    const advertised = registeredInput?.safeParse(wireInput);
+    expect(advertised?.success).toBe(true);
+
+    const response = await handlers.get('remote_strict_refined')!(wireInput, {});
+    expect(response.isError).toBeFalsy();
+    expect(domainHandler).toHaveBeenCalledWith(expect.any(Object), { mode: 'preview' });
+  });
+
+  it('does not advertise Remote Relay controls in local bridge mode', () => {
+    const registry = new ToolRegistry();
+    registry.register(
+      createMockTool('local_schema_tool', 'core', {
+        inputSchema: z.object({ query: z.string() }),
+      }),
+    );
+    let registeredInput: z.ZodType | undefined;
+    registry.registerAllOnServer(
+      {
+        registerTool: (_name: string, definition: { inputSchema: z.ZodType }) => {
+          registeredInput = definition.inputSchema;
+        },
+      } as any,
+      mockContext({
+        config: {
+          bridgeTimeoutMs: 1000,
+          artifactDir: '.easyeda-mcp-pro/artifacts',
+          bridgeHost: '127.0.0.1',
+          bridgePort: 49620,
+          MCP_BRIDGE_BACKEND: 'local_bridge',
+        },
+      }),
+    );
+
+    expect(registeredInput).toBeInstanceOf(z.ZodObject);
+    expect((registeredInput as z.ZodObject).shape).not.toHaveProperty('remoteSessionId');
+    expect((registeredInput as z.ZodObject).shape).not.toHaveProperty('remoteApprovalId');
+  });
+  it('routes bridge calls through RemoteGateway when MCP_BRIDGE_BACKEND=remote_relay', async () => {
+    const routeToolRequest = vi.fn(async () => ({
+      ok: true as const,
+      sessionId: 'sess_1',
+      toolName: 'schematic.listComponents',
+      result: { ok: true },
+      durationMs: 4,
+    }));
+    const registry = new ToolRegistry();
+    registry.register(
+      createMockTool('remote_read_tool', 'core', {
+        inputSchema: z.object({ remoteSessionId: z.string().optional() }),
+        handler: async (ctx) =>
+          await ctx.bridge.call(
+            'schematic.listComponents',
+            { includeHidden: false },
+            { timeoutMs: 123 },
+          ),
+      }),
+    );
+    const { server, handlers } = mockMcpServer();
+    registry.registerAllOnServer(
+      server as any,
+      mockContext({
+        config: {
+          bridgeTimeoutMs: 1000,
+          artifactDir: '.easyeda-mcp-pro/artifacts',
+          bridgeHost: '127.0.0.1',
+          bridgePort: 49620,
+          MCP_BRIDGE_BACKEND: 'remote_relay',
+        },
+        remote: { gateway: { routeToolRequest } as any },
+      }),
+    );
+
+    const headers = new Map<string, string>([
+      ['x-remote-user-id', 'user-a'],
+      ['x-remote-scopes', 'easyeda.read'],
+    ]);
+    const response = await handlers.get('remote_read_tool')!(
+      { remoteSessionId: 'sess_1' },
+      { requestInfo: { headers } },
+    );
+
+    expect(response.isError).toBeFalsy();
+    expect(routeToolRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'sess_1',
+        toolName: 'schematic.listComponents',
+        riskLevel: 'read',
+        input: { includeHidden: false },
+        deadlineMs: 123,
+      }),
+    );
+    expect(routeToolRequest.mock.calls[0]?.[0].identity).toMatchObject({
+      userId: 'user-a',
+      scopes: ['easyeda.read'],
+    });
+  });
+
+  it('classifies a high-risk confirmWrite tool as destructive for Remote Relay authorization', async () => {
+    const authorizeToolInvocation = vi.fn(async () => ({
+      ok: true as const,
+      sessionId: 'sess_high_risk',
+      grantId: 'grant_high_risk',
+    }));
+    const revokeInvocationGrant = vi.fn(() => true);
+    const registry = new ToolRegistry();
+    registry.register(
+      createMockTool('remote_high_risk_tool', 'core', {
+        risk: 'high',
+        confirmWrite: true,
+        inputSchema: z.object({ confirmWrite: z.literal(true) }),
+      }),
+    );
+    const { server, handlers } = mockMcpServer();
+    registry.registerAllOnServer(
+      server as any,
+      mockContext({
+        config: {
+          bridgeTimeoutMs: 1000,
+          artifactDir: '.easyeda-mcp-pro/artifacts',
+          bridgeHost: '127.0.0.1',
+          bridgePort: 49620,
+          MCP_BRIDGE_BACKEND: 'remote_relay',
+        },
+        remote: {
+          gateway: { authorizeToolInvocation, revokeInvocationGrant } as any,
+        },
+      }),
+    );
+
+    const response = await handlers.get('remote_high_risk_tool')!(
+      {
+        confirmWrite: true,
+        remoteSessionId: 'sess_high_risk',
+        remoteApprovalId: 'approval_high_risk',
+      },
+      {
+        authInfo: {
+          clientId: 'client-a',
+          scopes: ['easyeda:write'],
+          extra: { sub: 'user-a' },
+        },
+      },
+    );
+
+    expect(response.isError).toBeFalsy();
+    expect(authorizeToolInvocation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolName: 'remote_high_risk_tool',
+        riskLevel: 'destructive',
+        approvalId: 'approval_high_risk',
+      }),
+    );
+    expect(revokeInvocationGrant).toHaveBeenCalledWith('grant_high_risk');
+  });
+
+  it('authorizes a risky MCP invocation once and reuses its private grant for every bridge call', async () => {
+    const authorizeToolInvocation = vi.fn(async () => ({
+      ok: true as const,
+      sessionId: 'sess_2',
+      grantId: 'grant_1',
+    }));
+    const routeToolRequest = vi.fn(async (input: { toolName: string }) => ({
+      ok: true as const,
+      sessionId: 'sess_2',
+      toolName: input.toolName,
+      result: { ok: true },
+      durationMs: 7,
+    }));
+    const revokeInvocationGrant = vi.fn(() => true);
+    const registry = new ToolRegistry();
+    registry.register(
+      createMockTool('remote_export_tool', 'core', {
+        group: 'export',
+        risk: 'high',
+        confirmWrite: true,
+        sideEffect: 'artifact-write',
+        inputSchema: z.object({ confirmWrite: z.boolean() }),
+        handler: async (ctx) => {
+          await ctx.bridge.call('board.prepareExport', { format: 'zip' });
+          await ctx.bridge.call('board.exportGerbers', { format: 'zip' });
+          return { ok: true };
+        },
+      }),
+    );
+    const { server, handlers } = mockMcpServer();
+    registry.registerAllOnServer(
+      server as any,
+      mockContext({
+        config: {
+          bridgeTimeoutMs: 1000,
+          artifactDir: '.easyeda-mcp-pro/artifacts',
+          bridgeHost: '127.0.0.1',
+          bridgePort: 49620,
+          MCP_BRIDGE_BACKEND: 'remote_relay',
+        },
+        remote: {
+          gateway: {
+            authorizeToolInvocation,
+            routeToolRequest,
+            revokeInvocationGrant,
+          } as any,
+        },
+      }),
+    );
+
+    const response = await handlers.get('remote_export_tool')!(
+      {
+        confirmWrite: true,
+        remoteSessionId: 'sess_2',
+        remoteApprovalId: 'appr_1',
+      },
+      {
+        authInfo: {
+          clientId: 'client-a',
+          scopes: ['easyeda:export'],
+          extra: { sub: 'user-a' },
+        },
+      },
+    );
+
+    expect(response.isError).toBeFalsy();
+    expect(authorizeToolInvocation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'sess_2',
+        toolName: 'remote_export_tool',
+        riskLevel: 'export',
+        input: { confirmWrite: true },
+        approvalId: 'appr_1',
+      }),
+    );
+    expect(routeToolRequest).toHaveBeenCalledTimes(2);
+    expect(routeToolRequest).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        sessionId: 'sess_2',
+        toolName: 'board.prepareExport',
+        riskLevel: 'export',
+        input: { format: 'zip' },
+        grantId: 'grant_1',
+      }),
+    );
+    expect(routeToolRequest).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        sessionId: 'sess_2',
+        toolName: 'board.exportGerbers',
+        grantId: 'grant_1',
+      }),
+    );
+    expect(revokeInvocationGrant).toHaveBeenCalledWith('grant_1');
+    expect(routeToolRequest.mock.calls[0]?.[0].identity).toMatchObject({
+      userId: 'user-a',
+      scopes: ['easyeda.export'],
+    });
+  });
+
+  it('uses the configured Remote Relay session id when request input omits one', async () => {
+    const routeToolRequest = vi.fn(async () => ({
+      ok: true as const,
+      sessionId: 'sess_configured',
+      toolName: 'schematic.getDocument',
+      result: { ok: true },
+      durationMs: 2,
+    }));
+    const registry = new ToolRegistry();
+    registry.register(
+      createMockTool('remote_configured_session_tool', 'core', {
+        handler: async (ctx) => await ctx.bridge.call('schematic.getDocument'),
+      }),
+    );
+    const { server, handlers } = mockMcpServer();
+    registry.registerAllOnServer(
+      server as any,
+      mockContext({
+        config: {
+          bridgeTimeoutMs: 1000,
+          artifactDir: '.easyeda-mcp-pro/artifacts',
+          bridgeHost: '127.0.0.1',
+          bridgePort: 49620,
+          MCP_BRIDGE_BACKEND: 'remote_relay',
+          MCP_REMOTE_SESSION_ID: 'sess_configured',
+        },
+        remote: { gateway: { routeToolRequest } as any },
+      }),
+    );
+
+    const response = await handlers.get('remote_configured_session_tool')!({}, {});
+
+    expect(response.isError).toBeFalsy();
+    expect(routeToolRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'sess_configured' }),
+    );
+  });
+
+  it('surfaces Remote Relay routing failures as structured tool errors', async () => {
+    const routeToolRequest = vi.fn(async () => ({
+      ok: false as const,
+      status: 424,
+      code: 'SESSION_DISCONNECTED' as const,
+      message: 'Paired EasyEDA extension is disconnected.',
+    }));
+    const registry = new ToolRegistry();
+    registry.register(
+      createMockTool('remote_failure_tool', 'core', {
+        inputSchema: z.object({ remoteSessionId: z.string().optional() }),
+        handler: async (ctx) => await ctx.bridge.call('schematic.getDocument'),
+      }),
+    );
+    const { server, handlers } = mockMcpServer();
+    registry.registerAllOnServer(
+      server as any,
+      mockContext({
+        config: {
+          bridgeTimeoutMs: 1000,
+          artifactDir: '.easyeda-mcp-pro/artifacts',
+          bridgeHost: '127.0.0.1',
+          bridgePort: 49620,
+          MCP_BRIDGE_BACKEND: 'remote_relay',
+        },
+        remote: { gateway: { routeToolRequest } as any },
+      }),
+    );
+
+    const response = await handlers.get('remote_failure_tool')!({ remoteSessionId: 'missing' });
+
+    expect(response.isError).toBe(true);
+    expect(response.structuredContent).toMatchObject({
+      errorCode: ErrorCodes.REMOTE_RELAY,
+      details: {
+        toolName: 'remote_failure_tool',
+        remoteCode: 'SESSION_DISCONNECTED',
+        status: 424,
+      },
+    });
+    expect(response.content[0].text).toContain('SESSION_DISCONNECTED');
+  });
+
+  it('surfaces a missing RemoteGateway when remote backend is enabled', async () => {
+    const registry = new ToolRegistry();
+    registry.register(
+      createMockTool('remote_missing_gateway_tool', 'core', {
+        handler: async (ctx) => await ctx.bridge.call('schematic.getDocument'),
+      }),
+    );
+    const { server, handlers } = mockMcpServer();
+    registry.registerAllOnServer(
+      server as any,
+      mockContext({
+        config: {
+          bridgeTimeoutMs: 1000,
+          artifactDir: '.easyeda-mcp-pro/artifacts',
+          bridgeHost: '127.0.0.1',
+          bridgePort: 49620,
+          MCP_BRIDGE_BACKEND: 'remote_relay',
+        },
+      }),
+    );
+
+    const response = await handlers.get('remote_missing_gateway_tool')!({});
+
+    expect(response.isError).toBe(true);
+    expect(response.content[0].text).toContain('no RemoteGateway is configured');
+  });
+
+  it('accepts Remote Relay identity from OAuth client id when no subject claim exists', async () => {
+    const routeToolRequest = vi.fn(async () => ({
+      ok: true as const,
+      sessionId: 'sess_client',
+      toolName: 'schematic.getDocument',
+      result: { ok: true },
+      durationMs: 2,
+    }));
+    const registry = new ToolRegistry();
+    registry.register(
+      createMockTool('remote_client_identity_tool', 'core', {
+        handler: async (ctx) => await ctx.bridge.call('schematic.getDocument'),
+      }),
+    );
+    const { server, handlers } = mockMcpServer();
+    registry.registerAllOnServer(
+      server as any,
+      mockContext({
+        config: {
+          bridgeTimeoutMs: 1000,
+          artifactDir: '.easyeda-mcp-pro/artifacts',
+          bridgeHost: '127.0.0.1',
+          bridgePort: 49620,
+          MCP_BRIDGE_BACKEND: 'remote_relay',
+          MCP_REMOTE_SESSION_ID: 'sess_client',
+        },
+        remote: { gateway: { routeToolRequest } as any },
+      }),
+    );
+
+    await handlers.get('remote_client_identity_tool')!(
+      {},
+      {
+        authInfo: { clientId: 'client-only', scopes: ['easyeda:read'], extra: {} },
+      },
+    );
+
+    expect(routeToolRequest.mock.calls[0]?.[0].identity).toMatchObject({
+      userId: 'client-only',
+      scopes: ['easyeda.read'],
+    });
+  });
+
+  it('ignores non-scalar debug identity headers instead of stringifying objects', async () => {
+    const routeToolRequest = vi.fn(async () => ({
+      ok: true as const,
+      sessionId: 'sess_headers',
+      toolName: 'schematic.getDocument',
+      result: { ok: true },
+      durationMs: 2,
+    }));
+    const registry = new ToolRegistry();
+    registry.register(
+      createMockTool('remote_non_scalar_headers_tool', 'core', {
+        handler: async (ctx) => await ctx.bridge.call('schematic.getDocument'),
+      }),
+    );
+    const { server, handlers } = mockMcpServer();
+    registry.registerAllOnServer(
+      server as any,
+      mockContext({
+        config: {
+          bridgeTimeoutMs: 1000,
+          artifactDir: '.easyeda-mcp-pro/artifacts',
+          bridgeHost: '127.0.0.1',
+          bridgePort: 49620,
+          MCP_BRIDGE_BACKEND: 'remote_relay',
+          MCP_REMOTE_SESSION_ID: 'sess_headers',
+        },
+        remote: { gateway: { routeToolRequest } as any },
+      }),
+    );
+
+    await handlers.get('remote_non_scalar_headers_tool')!(
+      {},
+      {
+        requestInfo: { headers: { 'x-remote-user-id': { bad: 'object' } } },
+      },
+    );
+
+    expect(routeToolRequest.mock.calls[0]?.[0].identity).toBeUndefined();
   });
 });

@@ -1,8 +1,16 @@
 import { z } from 'zod';
 import { type BridgeDiagnosticsSnapshot, type ToolDefinition, type ToolContext } from './types.js';
 import { type EnvConfig } from '../config/env.js';
+import { getFeatureMaturity } from '../config/feature-maturity.js';
+import {
+  buildCapabilityFeatureFlags,
+  buildDetailedFeatureFlags,
+  buildServerConfigFeatureFlags,
+} from './diagnostics-feature-report.js';
+import { EasyedaApiMethodSchema } from '../bridge/types.js';
 import { PROFILE_DEFINITIONS } from '../config/profiles.js';
 import { SERVER_VERSION } from '../config/version.js';
+import { STARTER_DEVICE_CATALOG } from '../catalog/index.js';
 import {
   DEFAULT_LATENCY_BUDGETS,
   DEFAULT_RETENTION_POLICY,
@@ -13,6 +21,15 @@ import {
 const apiInventoryInputSchema = z.object({
   filter: z.string().optional(),
 });
+
+const featureMaturityEntrySchema = z.object({
+  maturity: z.enum(['implemented', 'experimental', 'reserved']),
+  configured: z.boolean(),
+  effective: z.boolean(),
+  note: z.string(),
+});
+
+const featureMaturitySchema = z.record(z.string(), featureMaturityEntrySchema);
 
 const bridgeDiagnosticsSchema = z.object({
   manager_uptime_ms: z.number().optional(),
@@ -44,13 +61,13 @@ function registerDiagnosticsCore(
     name: 'easyeda_health_check',
     title: 'Health check',
     description:
-      'Return server health status, including runtime version, active profile, bridge state, and config validity.',
+      'Return server health status in one call: runtime version, active profile, bridge state, EasyEDA version, keyless sourcing state, and starter catalog size. Intended as the single actionable status check after first connecting the bridge extension.',
     profile: 'core',
     evidence: ['official-docs'],
     risk: 'low',
     confirmWrite: false,
     group: 'diagnostics',
-    version: '1.0.0',
+    version: '1.1.0',
     annotations: {
       readOnlyHint: true,
       idempotentHint: true,
@@ -63,16 +80,34 @@ function registerDiagnosticsCore(
       profile: z.string(),
       transport: z.string(),
       bridge_connected: z.boolean(),
+      easyeda_version: z.string().optional(),
+      extension_version: z.string().optional(),
+      extension_version_mismatch: z.boolean(),
+      registry_mismatch: z.boolean(),
+      keyless_sourcing_enabled: z.boolean(),
+      catalog_device_count: z.number().int().nonnegative(),
       ups: z.number(),
     }),
     handler: async (ctx: ToolContext, _params: unknown) => {
+      const extensionVersionMismatch = ctx.bridge.extensionVersionMismatch ?? false;
+      const registryMismatch = ctx.bridge.registryMismatch ?? false;
       return {
-        status: ctx.bridge.connected ? ('ok' as const) : ('degraded' as const),
+        status: !ctx.bridge.connected
+          ? ('degraded' as const)
+          : extensionVersionMismatch || registryMismatch
+            ? ('degraded' as const)
+            : ('ok' as const),
         version: SERVER_VERSION,
         node_version: process.version,
         profile: ctx.profile,
         transport: config.TRANSPORT,
         bridge_connected: ctx.bridge.connected,
+        easyeda_version: ctx.bridge.easyedaVersion,
+        extension_version: ctx.bridge.extensionVersion,
+        extension_version_mismatch: extensionVersionMismatch,
+        registry_mismatch: registryMismatch,
+        keyless_sourcing_enabled: ctx.config.keylessSourcingEnabled ?? true,
+        catalog_device_count: STARTER_DEVICE_CATALOG.length,
         ups: process.uptime(),
       };
     },
@@ -172,6 +207,7 @@ function registerDiagnosticsCore(
       ),
       current_profile: z.string(),
       feature_flags: z.record(z.string(), z.boolean()),
+      feature_maturity: featureMaturitySchema,
       transports: z.array(z.string()),
     }),
     handler: async (_ctx: ToolContext, _params: unknown) => {
@@ -188,12 +224,8 @@ function registerDiagnosticsCore(
         protocol_version: config.MCP_PROTOCOL_VERSION,
         profiles,
         current_profile: config.TOOL_PROFILE,
-        feature_flags: {
-          tasks_enabled: config.MCP_TASKS_ENABLED,
-          apps_enabled: config.MCP_APPS_ENABLED,
-          v2_experimental: config.MCP_V2_EXPERIMENTAL,
-          ordering_enabled: config.JLCPCB_ENABLE_ORDERING,
-        },
+        feature_flags: buildCapabilityFeatureFlags(config),
+        feature_maturity: getFeatureMaturity(config),
         transports: [config.TRANSPORT],
       };
     },
@@ -225,8 +257,12 @@ function registerDiagnosticsCore(
       bridge_port: z.number(),
       mcp_protocol_version: z.string(),
       flags: z.record(z.string(), z.boolean()).optional(),
+      feature_maturity: featureMaturitySchema,
     }),
-    handler: async (_ctx: ToolContext, _params: unknown) => {
+    handler: async (_ctx: ToolContext, params: unknown) => {
+      const { include_flags: includeFlags } = z
+        .object({ include_flags: z.boolean().default(false) })
+        .parse(params);
       return {
         node_env: config.NODE_ENV,
         log_level: config.LOG_LEVEL,
@@ -235,6 +271,8 @@ function registerDiagnosticsCore(
         bridge_host: config.BRIDGE_HOST,
         bridge_port: config.BRIDGE_PORT,
         mcp_protocol_version: config.MCP_PROTOCOL_VERSION,
+        flags: includeFlags ? buildServerConfigFeatureFlags(config) : undefined,
+        feature_maturity: getFeatureMaturity(config),
       };
     },
   });
@@ -301,24 +339,12 @@ function registerDiagnosticsCore(
     inputSchema: z.object({}),
     outputSchema: z.object({
       flags: z.record(z.string(), z.boolean()),
+      maturity: featureMaturitySchema,
     }),
     handler: async (_ctx: ToolContext, _params: unknown) => {
       return {
-        flags: {
-          mcp_tasks_enabled: config.MCP_TASKS_ENABLED,
-          mcp_apps_enabled: config.MCP_APPS_ENABLED,
-          mcp_v2_experimental: config.MCP_V2_EXPERIMENTAL,
-          jlcpcb_ordering_enabled: config.JLCPCB_ENABLE_ORDERING,
-          jlcsearch_enabled: config.JLCSEARCH_ENABLED,
-          mouser_enabled: config.MOUSER_ENABLED,
-          digikey_enabled: config.DIGIKEY_ENABLED,
-          oauth_enabled: config.OAUTH_ENABLED,
-          otel_enabled: config.OTEL_ENABLED,
-          ai_enabled: config.AI_PROVIDER !== 'none',
-          dev_bridge: config.EASYEDA_DEV_BRIDGE,
-          bridge_raw_exec_enabled: config.BRIDGE_RAW_EXEC_ENABLED,
-          raw_exec_experimental: config.MCP_RAW_EXEC_EXPERIMENTAL,
-        },
+        flags: buildDetailedFeatureFlags(config),
+        maturity: getFeatureMaturity(config),
       };
     },
   });
@@ -466,10 +492,48 @@ function registerDiagnosticsCore(
           status: ctx.bridge.connected ? ('pass' as const) : ('warn' as const),
           message: ctx.bridge.connected ? 'Bridge connected' : 'Bridge not connected',
         },
+        {
+          name: 'easyeda_version_detected',
+          status: ctx.bridge.easyedaVersion ? ('pass' as const) : ('skipped' as const),
+          message: ctx.bridge.easyedaVersion
+            ? `EasyEDA Pro version ${ctx.bridge.easyedaVersion}`
+            : ctx.bridge.connected
+              ? 'Skipped: bridge connected but did not report an EasyEDA version'
+              : 'Skipped: bridge not connected',
+        },
+        {
+          name: 'extension_version_match',
+          status: !ctx.bridge.extensionVersion
+            ? ('skipped' as const)
+            : ctx.bridge.extensionVersionMismatch
+              ? ('warn' as const)
+              : ('pass' as const),
+          message: !ctx.bridge.extensionVersion
+            ? 'Skipped: extension did not report a version'
+            : ctx.bridge.extensionVersionMismatch
+              ? `Extension version ${ctx.bridge.extensionVersion} does not match server version ${SERVER_VERSION}; update the extension in EasyEDA Pro`
+              : 'Extension version matches server version',
+        },
+        {
+          // Unlike the advisory version check above, a stale dispatcher method
+          // registry FAILS the self test: the extension would silently serve
+          // old dispatch logic for methods the server believes exist.
+          name: 'method_registry_match',
+          status: !ctx.bridge.extensionMethodListHash
+            ? ('skipped' as const)
+            : ctx.bridge.registryMismatch
+              ? ('fail' as const)
+              : ('pass' as const),
+          message: !ctx.bridge.extensionMethodListHash
+            ? 'Skipped: extension did not report a dispatcher method-list hash (pre-0.22 build)'
+            : ctx.bridge.registryMismatch
+              ? `Extension dispatcher method registry (${ctx.bridge.extensionMethodListHash}) does not match the server registry (${ctx.bridge.methodRegistryHash}). Re-import the extension, or enable BRIDGE_HOT_SWAP_ENABLED to auto-push in dev.`
+              : 'Extension dispatcher method registry matches the server',
+        },
       ];
 
       return {
-        passed: checks.every((c) => c.status === 'pass'),
+        passed: checks.every((c) => c.status === 'pass' || c.status === 'skipped'),
         checks,
       };
     },
@@ -502,11 +566,51 @@ function registerDiagnosticsCore(
         }),
       ),
       total: z.number(),
+      source: z.enum(['loader_status', 'server_registry']).optional(),
+      dispatcher_build_id: z.string().optional(),
     }),
-    handler: async (_ctx: ToolContext, _params: unknown) => {
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const { filter } = z.object({ filter: z.string().optional() }).parse(params);
+      const registryMethods = [...EasyedaApiMethodSchema.options].sort((a, b) =>
+        a.localeCompare(b),
+      );
+
+      // Prefer the live method list from the extension loader (exact for the
+      // active dispatcher); fall back to the server registry with availability
+      // implied by the bridge connection when the loader predates loaderStatus.
+      let extensionMethods: Set<string> | null = null;
+      let buildId: string | undefined;
+      try {
+        const status = await ctx.bridge.call<
+          Record<string, never>,
+          { buildId?: string; methodCount?: number } & Record<string, unknown>
+        >('system.loaderStatus', {});
+        buildId = typeof status.buildId === 'string' ? status.buildId : undefined;
+        const list = (
+          await ctx.bridge.call<Record<string, never>, { capabilities?: unknown }>(
+            'system.getStatus',
+            {},
+          )
+        ).capabilities;
+        if (Array.isArray(list)) {
+          extensionMethods = new Set(list.filter((m): m is string => typeof m === 'string'));
+        }
+      } catch {
+        // Loader status unavailable — old extension build or bridge down.
+      }
+
+      const normalizedFilter = filter?.toLowerCase().trim();
+      const methods = registryMethods
+        .filter((name) => !normalizedFilter || name.toLowerCase().includes(normalizedFilter))
+        .map((name) => ({
+          name,
+          available: extensionMethods ? extensionMethods.has(name) : ctx.bridge.connected,
+        }));
       return {
-        methods: [],
-        total: 0,
+        methods,
+        total: methods.length,
+        source: extensionMethods ? ('loader_status' as const) : ('server_registry' as const),
+        dispatcher_build_id: buildId,
       };
     },
   });

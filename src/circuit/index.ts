@@ -32,6 +32,10 @@ export {
 } from './design-intent.js';
 export type { DesignIntent } from './design-intent.js';
 
+// Reference designs
+export { UsbIsolatedRs485ReferenceSchema } from './reference-design.js';
+export type { UsbIsolatedRs485Reference } from './reference-design.js';
+
 // CircuitIR
 export {
   CircuitIRSchema,
@@ -68,3 +72,19 @@ export type {
 // Compiler
 export { compile, setValidationStatus, isReadyForEasyEDA } from './compiler.js';
 export type { CompileOptions, CompileResult } from './compiler.js';
+
+// Component planning
+export {
+  ROLE_REFDES_PREFIX,
+  ROLE_PACKAGE_HINT,
+  COMPONENT_PLAN_METADATA_KEYS,
+  determineComponentRole,
+  planComponents,
+  getDeviceRole,
+} from './component-planning.js';
+export type {
+  ComponentRole,
+  RoleConfidence,
+  ComponentRolePlan,
+  ComponentPlanResult,
+} from './component-planning.js';

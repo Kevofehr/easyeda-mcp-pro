@@ -4,11 +4,11 @@ Constraint-driven validation for PCB board designs.
 
 ## Overview
 
-The PCB constraints module validates a PCB design against 12 constraint rules (4 errors, 8 warnings). It operates on a decoupled input type (`PcbConstraintInput`) that can be fed from CircuitIR, the EasyEDA bridge, or test fixtures.
+The PCB constraints module validates a PCB design against 23 board, fabrication, assembly, and testability rules. It operates on a decoupled input type (`PcbConstraintInput`) that can be fed from CircuitIR, the EasyEDA bridge, or test fixtures.
 
 The module supports two primary operations:
 
-- **`validatePcbConstraints()`** — run all 12 rules against board data and produce structured errors/warnings
+- **`validatePcbConstraints()`** — run all 23 rules against board data and produce structured errors/warnings
 - **`buildConstraintReport()`** — build a human-readable report from validation results, listing which constraints were checked and which require manual review
 
 ## Validation Model
@@ -45,7 +45,7 @@ Each `PcbConstraintIssue` contains:
 
 ### 1. Missing Board Outline (error)
 
-**Severity:** error  
+**Severity:** error
 **Detects:** Board outline polygon is not defined.
 
 ```text
@@ -55,7 +55,7 @@ Board outline is not defined
 
 ### 2. Board Outline Too Small (warning)
 
-**Severity:** warning  
+**Severity:** warning
 **Detects:** Board width or height below 5 mm.
 
 ```text
@@ -65,7 +65,7 @@ Board width (3mm) is below recommended minimum of 5mm
 
 ### 3. Missing Layer Stackup (warning)
 
-**Severity:** warning  
+**Severity:** warning
 **Detects:** No detailed layer stackup defined.
 
 ```text
@@ -75,7 +75,7 @@ Detailed layer stackup is not defined
 
 ### 4. Layer Count Mismatch (error)
 
-**Severity:** error  
+**Severity:** error
 **Detects:** Board has more than 2 layers but no detailed stackup defined.
 
 ```text
@@ -85,7 +85,7 @@ Board has 4 layers but no detailed stackup is defined
 
 ### 5. Missing Mounting Holes (warning)
 
-**Severity:** warning  
+**Severity:** warning
 **Detects:** Zero mounting holes defined.
 
 ```text
@@ -95,7 +95,7 @@ No mounting holes defined on the board
 
 ### 6. Missing Net Classes (warning)
 
-**Severity:** warning  
+**Severity:** warning
 **Detects:** No net classes with routing rules defined.
 
 ```text
@@ -105,7 +105,7 @@ No net classes with routing rules are defined
 
 ### 7. Invalid Clearance (warning)
 
-**Severity:** warning  
+**Severity:** warning
 **Detects:** Net classes defined but no clearance rules between them.
 
 ```text
@@ -115,7 +115,7 @@ Net classes are defined but no clearance rules between them
 
 ### 8. Keepout Violations (warning)
 
-**Severity:** warning  
+**Severity:** warning
 **Detects:** Placement zones defined but no keepout/restricted areas.
 
 ```text
@@ -125,7 +125,7 @@ Placement zones are defined but no keepout/restricted areas
 
 ### 9. Missing Placement Zones (warning)
 
-**Severity:** warning  
+**Severity:** warning
 **Detects:** Multi-layer board without placement zones.
 
 ```text
@@ -135,7 +135,7 @@ No placement zones defined for component grouping
 
 ### 10. Missing Manufacturing Constraints (warning)
 
-**Severity:** warning  
+**Severity:** warning
 **Detects:** Manufacturing process or production quantity not specified.
 
 ```text
@@ -145,7 +145,7 @@ Manufacturing process (lead-free/lead-based) is not specified
 
 ### 11. Fiducials Recommended (warning)
 
-**Severity:** warning  
+**Severity:** warning
 **Detects:** Board with mounting holes but no fiducial marks.
 
 ```text
@@ -155,13 +155,69 @@ No fiducial marks defined for SMT assembly
 
 ### 12. High-Voltage Clearance (error)
 
-**Severity:** error  
+**Severity:** error
 **Detects:** High-voltage domain without clearance/net-class rules.
 
 ```text
 High-voltage domain detected but no clearance rules defined
 → Define explicit creepage and clearance distances for high-voltage nets
 ```
+
+### 13. Drill File Missing (error)
+
+**Severity:** error
+**Detects:** Manufacturing package lacks NC drill / Excellon drill output.
+
+### 14. Copper-to-Edge Clearance (error)
+
+**Severity:** error
+**Detects:** Copper, vias, pads, or zones too close to the routed board edge.
+Default recommendation: at least `0.25mm` copper-to-edge clearance.
+
+### 15. Drill / Annular Ring Risk (warning)
+
+**Severity:** warning
+**Detects:** Minimum drill below `0.20mm` or annular ring below `0.10mm`.
+
+### 16. Soldermask Sliver (warning)
+
+**Severity:** warning
+**Detects:** Soldermask web/sliver below `0.10mm` or explicit sliver violations.
+
+### 17. Silkscreen Over Pad (warning)
+
+**Severity:** warning
+**Detects:** Silkscreen text/graphics overlapping exposed copper pads.
+
+### 18. Tooling Holes (warning)
+
+**Severity:** warning
+**Detects:** SMT assembly data present but fewer than two tooling holes are declared.
+
+### 19. Polarity / Orientation Marks (warning)
+
+**Severity:** warning
+**Detects:** Polarized or orientation-sensitive components without matching polarity marks.
+
+### 20. Component Spacing / Courtyard (warning)
+
+**Severity:** warning
+**Detects:** Component spacing or courtyard violations that can affect placement, soldering, or rework.
+
+### 21. Testpoint Coverage (warning)
+
+**Severity:** warning
+**Detects:** Critical nets missing accessible test pads. Default minimum coverage is `80%`.
+
+### 22. Programming Header Missing (error)
+
+**Severity:** error
+**Detects:** A design marked as requiring programming/debug access without a programming header or equivalent pads.
+
+### 23. Fabrication Notes Missing (warning)
+
+**Severity:** warning
+**Detects:** Missing fabrication notes for thickness, copper weight, finish, soldermask, impedance, panelization, or special instructions.
 
 ## Error Codes
 
@@ -179,6 +235,18 @@ High-voltage domain detected but no clearance rules defined
 | `PCB_MISSING_MANUFACTURING_CONSTRAINTS` | warning  | 10     |
 | `PCB_FIDUCIAL_REQUIRED`                 | warning  | 11     |
 | `PCB_HIGH_VOLTAGE_CLEARANCE`            | error    | 12     |
+| `PCB_DRILL_FILE_MISSING`                | error    | 13     |
+| `PCB_COPPER_EDGE_CLEARANCE`             | error    | 14     |
+| `PCB_DRILL_TOO_SMALL`                   | warning  | 15     |
+| `PCB_ANNULAR_RING_TOO_SMALL`            | warning  | 15     |
+| `PCB_SOLDERMASK_SLIVER`                 | warning  | 16     |
+| `PCB_SILKSCREEN_OVER_PAD`               | warning  | 17     |
+| `PCB_TOOLING_HOLE_MISSING`              | warning  | 18     |
+| `PCB_POLARITY_MARK_MISSING`             | warning  | 19     |
+| `PCB_COMPONENT_SPACING_VIOLATION`       | warning  | 20     |
+| `PCB_TESTPOINT_COVERAGE_LOW`            | warning  | 21     |
+| `PCB_PROGRAMMING_HEADER_MISSING`        | error    | 22     |
+| `PCB_FAB_NOTES_MISSING`                 | warning  | 23     |
 
 ## Usage
 
@@ -212,6 +280,45 @@ if (!result.valid) {
   }
 }
 ```
+
+### Production review data
+
+Production review fields are optional and only fire when the corresponding data is present.
+This lets live board probes, CircuitIR, or export manifests progressively add more manufacturing detail without creating false positives on simple board snapshots.
+
+```typescript
+const result = validatePcbConstraints({
+  widthMm: 60,
+  heightMm: 40,
+  layerCount: 2,
+  hasOutline: true,
+  hasLayerStack: true,
+  hasNetClasses: true,
+  hasClearanceRules: true,
+  hasDrillFile: true,
+  minCopperToEdgeMm: 0.35,
+  minDrillMm: 0.3,
+  minAnnularRingMm: 0.15,
+  minSolderMaskSliverMm: 0.12,
+  smtComponentCount: 12,
+  fiducialCount: 3,
+  toolingHoleCount: 2,
+  polarizedComponentCount: 4,
+  polarityMarkCount: 4,
+  criticalNetNames: ['GND', '3V3', 'RESET', 'SWDIO', 'SWCLK'],
+  testPointNets: ['GND', '3V3', 'RESET', 'SWDIO', 'SWCLK'],
+  requiresProgrammingHeader: true,
+  hasProgrammingHeader: true,
+  hasFabricationNotes: true,
+});
+```
+
+The MCP tool `easyeda_pcb_production_review` exposes the same review model to agents.
+`easyeda_export_gerbers` can also run the same review as an optional gate:
+
+- `mode: 'warn'` returns production findings but still exports.
+- `mode: 'block'` stops Gerber export when production errors exist.
+- `mode: 'off'` preserves the legacy export behavior.
 
 ### Constraint Reports
 
@@ -261,12 +368,13 @@ The converter handles:
 - `highVoltage` → `hasHighVoltage` (defaults to false)
 - `manufacturingProcess` + `manufacturing.process` → `manufacturingProcess`
 - `quantity` + `manufacturing.quantity` → `hasQuantity`
+- production review fields such as drill, copper-to-edge, soldermask, silkscreen, fiducials, tooling holes, test points, programming header, and fabrication notes are passed through directly
 
 ## API Reference
 
 ### `validatePcbConstraints(input: PcbConstraintInput): PcbConstraintResult`
 
-Run all 12 validation rules against board data. Returns errors and warnings.
+Run all 23 validation rules against board data. Returns errors and warnings.
 
 ### `buildConstraintReport(input: PcbConstraintInput, result: PcbConstraintResult): ConstraintReport`
 

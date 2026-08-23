@@ -15,17 +15,12 @@ async function readExtensionSource(): Promise<string> {
 }
 
 describe('bridge extension runtime compatibility guards', () => {
-  it('keeps the EasyEDA register open fallback for v3 connectedCallFn gaps', async () => {
+  it('only marks the register socket open via the real connectedCallFn, never a speculative timer', async () => {
     const source = await readExtensionSource();
 
-    // This fork keeps a src-labeled fireOpen (emits "open via connectedCallFn" /
-    // "open via fallback-timer" diagnostics) — functionally the same v3 fallback
-    // fix, using the same constant.
-    expect(source).toContain('EASYEDA_REGISTER_OPEN_FALLBACK_MS');
-    expect(source).toContain('const fireOpen = (src: string): void =>');
-    expect(source).toContain(
-      "setTimeout(() => fireOpen('fallback-timer'), EASYEDA_REGISTER_OPEN_FALLBACK_MS);",
-    );
+    expect(source).toContain('const fireOpen = (): void =>');
+    expect(source).not.toContain('EASYEDA_REGISTER_OPEN_FALLBACK_MS');
+    expect(source).toContain("Only the API's real connected callback may mark the socket open.");
   });
 
   it('surfaces the External Interactions permission hint when register throws', async () => {

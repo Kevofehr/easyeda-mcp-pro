@@ -181,6 +181,137 @@ describe('warnings', () => {
   });
 });
 
+// ── Production review rules ────────────────────────────────────────────────
+
+describe('production review rules', () => {
+  it('rejects missing drill files', () => {
+    const result = validatePcbConstraints(makeInput({ hasDrillFile: false }));
+    const err = result.errors.find((e) => e.code === 'PCB_DRILL_FILE_MISSING');
+    expect(err).toBeDefined();
+    expect(err!.remediationHint).toContain('NC drill');
+  });
+
+  it('rejects copper-to-edge clearance violations', () => {
+    const result = validatePcbConstraints(
+      makeInput({ minCopperToEdgeMm: 0.1, copperToEdgeViolationCount: 2 }),
+    );
+    const err = result.errors.find((e) => e.code === 'PCB_COPPER_EDGE_CLEARANCE');
+    expect(err).toBeDefined();
+    expect(err!.details?.recommendedMinimumMm).toBe(0.25);
+  });
+
+  it('warns for drill and annular-ring manufacturability risk', () => {
+    const result = validatePcbConstraints(makeInput({ minDrillMm: 0.15, minAnnularRingMm: 0.05 }));
+    expect(result.warnings.some((w) => w.code === 'PCB_DRILL_TOO_SMALL')).toBe(true);
+    expect(result.warnings.some((w) => w.code === 'PCB_ANNULAR_RING_TOO_SMALL')).toBe(true);
+  });
+
+  it('warns for soldermask slivers and silkscreen over pads', () => {
+    const result = validatePcbConstraints(
+      makeInput({
+        minSolderMaskSliverMm: 0.05,
+        solderMaskSliverViolationCount: 3,
+        silkscreenOverPadCount: 2,
+      }),
+    );
+    expect(result.warnings.some((w) => w.code === 'PCB_SOLDERMASK_SLIVER')).toBe(true);
+    expect(result.warnings.some((w) => w.code === 'PCB_SILKSCREEN_OVER_PAD')).toBe(true);
+  });
+
+  it('warns for missing SMT fiducials and tooling holes', () => {
+    const result = validatePcbConstraints(
+      makeInput({ smtComponentCount: 24, fiducialCount: 1, toolingHoleCount: 0 }),
+    );
+    expect(result.warnings.some((w) => w.code === 'PCB_FIDUCIAL_REQUIRED')).toBe(true);
+    expect(result.warnings.some((w) => w.code === 'PCB_TOOLING_HOLE_MISSING')).toBe(true);
+  });
+
+  it('warns for missing polarity marks and component spacing violations', () => {
+    const result = validatePcbConstraints(
+      makeInput({
+        polarizedComponentCount: 6,
+        polarityMarkCount: 4,
+        componentSpacingViolationCount: 2,
+      }),
+    );
+    expect(result.warnings.some((w) => w.code === 'PCB_POLARITY_MARK_MISSING')).toBe(true);
+    expect(result.warnings.some((w) => w.code === 'PCB_COMPONENT_SPACING_VIOLATION')).toBe(true);
+  });
+
+  it('warns when critical nets lack testpoint coverage', () => {
+    const result = validatePcbConstraints(
+      makeInput({
+        criticalNetNames: ['GND', '3V3', 'RESET', 'SWDIO', 'SWCLK'],
+        testPointNets: ['GND', '3V3'],
+      }),
+    );
+    const warn = result.warnings.find((w) => w.code === 'PCB_TESTPOINT_COVERAGE_LOW');
+    expect(warn).toBeDefined();
+    expect(warn!.details?.missingCriticalNets).toEqual(['RESET', 'SWDIO', 'SWCLK']);
+  });
+
+  it('rejects missing programming/debug header when required', () => {
+    const result = validatePcbConstraints(
+      makeInput({ requiresProgrammingHeader: true, hasProgrammingHeader: false }),
+    );
+    const err = result.errors.find((e) => e.code === 'PCB_PROGRAMMING_HEADER_MISSING');
+    expect(err).toBeDefined();
+    expect(err!.severity).toBe('error');
+  });
+
+  it('warns when fabrication notes are missing', () => {
+    const result = validatePcbConstraints(makeInput({ hasFabricationNotes: false }));
+    const warn = result.warnings.find((w) => w.code === 'PCB_FAB_NOTES_MISSING');
+    expect(warn).toBeDefined();
+  });
+
+  it('passes production review false-positive control for complete production data', () => {
+    const result = validatePcbConstraints(
+      makeInput({
+        hasDrillFile: true,
+        minCopperToEdgeMm: 0.35,
+        copperToEdgeViolationCount: 0,
+        minDrillMm: 0.3,
+        minAnnularRingMm: 0.15,
+        minSolderMaskSliverMm: 0.12,
+        solderMaskSliverViolationCount: 0,
+        silkscreenOverPadCount: 0,
+        smtComponentCount: 12,
+        fiducialCount: 3,
+        toolingHoleCount: 2,
+        polarizedComponentCount: 4,
+        polarityMarkCount: 4,
+        componentSpacingViolationCount: 0,
+        criticalNetNames: ['GND', '3V3', 'RESET', 'SWDIO', 'SWCLK'],
+        testPointNets: ['GND', '3V3', 'RESET', 'SWDIO', 'SWCLK'],
+        requiresProgrammingHeader: true,
+        hasProgrammingHeader: true,
+        hasFabricationNotes: true,
+      }),
+    );
+
+    expect(result.valid).toBe(true);
+    expect(
+      [...result.errors, ...result.warnings].filter((issue) =>
+        [
+          'PCB_DRILL_FILE_MISSING',
+          'PCB_COPPER_EDGE_CLEARANCE',
+          'PCB_DRILL_TOO_SMALL',
+          'PCB_ANNULAR_RING_TOO_SMALL',
+          'PCB_SOLDERMASK_SLIVER',
+          'PCB_SILKSCREEN_OVER_PAD',
+          'PCB_TOOLING_HOLE_MISSING',
+          'PCB_POLARITY_MARK_MISSING',
+          'PCB_COMPONENT_SPACING_VIOLATION',
+          'PCB_TESTPOINT_COVERAGE_LOW',
+          'PCB_PROGRAMMING_HEADER_MISSING',
+          'PCB_FAB_NOTES_MISSING',
+        ].includes(issue.code),
+      ),
+    ).toEqual([]);
+  });
+});
+
 // ── Summary ────────────────────────────────────────────────────────────────
 
 describe('validation summary', () => {
@@ -291,6 +422,13 @@ describe('fromPcbIntent', () => {
       manufacturingProcess: 'standard',
       quantity: 100,
       highVoltage: false,
+      hasDrillFile: true,
+      minCopperToEdgeMm: 0.35,
+      criticalNetNames: ['GND', '3V3'],
+      testPointNets: ['GND', '3V3'],
+      hasProgrammingHeader: true,
+      requiresProgrammingHeader: true,
+      hasFabricationNotes: true,
     };
     const input = fromPcbIntent(intent as Parameters<typeof fromPcbIntent>[0]);
     expect(input.hasOutline).toBe(true);
@@ -305,6 +443,12 @@ describe('fromPcbIntent', () => {
     expect(input.manufacturingProcess).toBe('standard');
     expect(input.hasQuantity).toBe(true);
     expect(input.hasHighVoltage).toBe(false);
+    expect(input.hasDrillFile).toBe(true);
+    expect(input.minCopperToEdgeMm).toBe(0.35);
+    expect(input.criticalNetNames).toEqual(['GND', '3V3']);
+    expect(input.hasProgrammingHeader).toBe(true);
+    expect(input.requiresProgrammingHeader).toBe(true);
+    expect(input.hasFabricationNotes).toBe(true);
   });
 
   it('converts highVoltage flag', () => {
@@ -330,6 +474,18 @@ describe('PcbConstraintCodeMap', () => {
       'NO_MOUNTING_HOLES',
       'NO_LAYER_STACK',
       'MANUFACTURING_OPTIONS_WARNING',
+      'DRILL_FILE_MISSING',
+      'COPPER_EDGE_CLEARANCE',
+      'DRILL_TOO_SMALL',
+      'ANNULAR_RING_TOO_SMALL',
+      'SOLDERMASK_SLIVER',
+      'SILKSCREEN_OVER_PAD',
+      'TOOLING_HOLE_MISSING',
+      'POLARITY_MARK_MISSING',
+      'COMPONENT_SPACING_VIOLATION',
+      'TESTPOINT_COVERAGE_LOW',
+      'PROGRAMMING_HEADER_MISSING',
+      'FAB_NOTES_MISSING',
     ];
     for (const c of codes) {
       expect(PcbConstraintCodeMap[c as keyof typeof PcbConstraintCodeMap]).toBeDefined();

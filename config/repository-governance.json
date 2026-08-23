@@ -1,0 +1,149 @@
+{
+  "schemaVersion": 1,
+  "liveStateVerifiedAt": "2026-08-10",
+  "owners": ["@oaslananka"],
+  "criticalPaths": {
+    "securityAndAutomation": [
+      "/.github/CODEOWNERS",
+      "/.github/workflows/",
+      "/.github/requirements/",
+      "/.github/dependency-audit-allowlist.json",
+      "/.github/renovate.json",
+      "/.mergify.yml",
+      "/.gitleaksignore",
+      "/.semgrep.yml",
+      "/.semgrepignore",
+      "/SECURITY.md",
+      "/docs/REPOSITORY_GOVERNANCE.md",
+      "/docs/security-architecture.md",
+      "/docs/SECURITY_ASSURANCE_CASE.md",
+      "/.github/pull_request_template.md",
+      "/config/repository-governance.json",
+      "/CONTRIBUTING.md",
+      "/docs/OPENSSF_BEST_PRACTICES.md",
+      "/tests/unit/repository/governance-policy.test.ts",
+      "/codecov.yml",
+      "/config/quality-gates.json",
+      "/docs/QUALITY_GATES.md",
+      "/docs/CODECOV_ANALYTICS.md",
+      "/tests/unit/repository/codecov-policy.test.ts",
+      "/tests/unit/repository/quality-gates-policy.test.ts",
+      "/config/secret-scanning-policy.json",
+      "/docs/SECRET_RESPONSE.md",
+      "/scripts/check-secret-hygiene.mjs",
+      "/tests/unit/repository/secret-scanning-policy.test.ts",
+      "/docs/MAINTAINER_CONTINUITY.md",
+      "/docs/SOLO_MAINTAINER_RECOVERY.md",
+      "/docs/evidence/governance/"
+    ],
+    "release": [
+      "/release-please-config.json",
+      "/.release-please-manifest.json",
+      "/scripts/release-channel-policy.mjs",
+      "/docs/RELEASE_POLICY.md",
+      "/docs/RELEASE_PROCESS.md",
+      "/docs/RELEASE_VERIFICATION.md",
+      "/docs/release-ci-runbook.md"
+    ],
+    "remoteTransport": [
+      "/src/remote/",
+      "/src/server/transports/http.ts",
+      "/src/server/transports/oauth-resource-metadata.ts",
+      "/src/bridge/"
+    ],
+    "writePaths": [
+      "/src/transactions/",
+      "/src/tools/L1_pcb_write.ts",
+      "/src/tools/L1_schematic_write.ts",
+      "/src/tools/L1_schematic_batch.ts",
+      "/src/tools/L1_transactions.ts",
+      "/src/tools/transaction.ts",
+      "/easyeda-bridge-extension/src/dispatcher.ts",
+      "/easyeda-bridge-extension/src/pcb-write-operations.ts",
+      "/easyeda-bridge-extension/src/pcb-mutation-operations.ts",
+      "/easyeda-bridge-extension/src/schematic-transaction-operations.ts",
+      "/easyeda-bridge-extension/src/remote-client.ts",
+      "/easyeda-bridge-extension/src/connection-policy.ts",
+      "/easyeda-bridge-extension/src/index.ts"
+    ]
+  },
+  "branchProtection": {
+    "requiredChecks": [
+      "quality (24)",
+      "codeql",
+      "Socket Security: Project Report",
+      "dependency-review",
+      "codecov/patch",
+      "SonarCloud Code Analysis",
+      "Mergify Merge Protections"
+    ],
+    "strictStatusChecks": true,
+    "requiredApprovals": 0,
+    "requireCodeOwnerReviews": false,
+    "dismissStaleReviews": false,
+    "requireLastPushApproval": false,
+    "requireConversationResolution": true,
+    "enforceAdmins": true,
+    "requireLinearHistory": true,
+    "allowForcePushes": false,
+    "allowDeletions": false
+  },
+  "repositoryRulesets": {
+    "active": true,
+    "authority": "repository-ruleset",
+    "name": "main-protection",
+    "target": "branch",
+    "include": ["~DEFAULT_BRANCH"],
+    "bypassActors": []
+  },
+  "reviewPolicy": {
+    "independentReview": "required-when-eligible-reviewer-exists",
+    "soloMaintainerLimitation": "publicly-documented",
+    "automatedFindingDisposition": "resolve-or-explicitly-disposition",
+    "emergencyException": "public-rationale-and-follow-up-review",
+    "activation": {
+      "trigger": "second-eligible-human-maintainer-has-review-access",
+      "accountableOwner": "@oaslananka",
+      "deadlineBusinessDays": 2,
+      "targetBranchProtection": {
+        "requiredApprovals": 1,
+        "requireCodeOwnerReviews": true,
+        "dismissStaleReviews": true,
+        "requireLastPushApproval": true
+      },
+      "verification": [
+        "verify-live-collaborator-permission",
+        "apply-main-branch-protection-target",
+        "verify-owner-authored-test-pr-is-reviewable",
+        "update-liveStateVerifiedAt"
+      ]
+    }
+  },
+  "continuity": {
+    "currentBusFactor": 1,
+    "minimumMaintainersForIndependentReview": 2,
+    "successorStatus": "not-designated",
+    "requiredSuccessorEvidence": [
+      "github-admin-or-maintain-access",
+      "npm-package-recovery-or-transfer-path",
+      "release-and-secret-rotation-runbook-reviewed",
+      "security-advisory-access-verified",
+      "emergency-release-dry-run-recorded"
+    ],
+    "operatingModel": "solo-maintainer",
+    "humanApprovalRequired": false,
+    "confidentialRecoveryRecord": {
+      "required": true,
+      "storage": "offline-encrypted",
+      "plaintextSecretsInRepository": false
+    },
+    "recovery": {
+      "runbook": "docs/SOLO_MAINTAINER_RECOVERY.md",
+      "exerciseEvidence": "docs/evidence/governance/2026-07-25-v0.35.3-release-recovery.json",
+      "branchProtectionEvidence": "docs/evidence/governance/2026-08-10-main-ruleset.json",
+      "reviewCadenceDays": 180,
+      "lastExerciseAt": "2026-07-25",
+      "exerciseStatus": "passed"
+    }
+  }
+}

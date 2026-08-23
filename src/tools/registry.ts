@@ -1,17 +1,22 @@
-import { type McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { type ToolDefinition, type ToolContext } from './types.js';
+import type { McpServer } from '@modelcontextprotocol/server';
+import { type ToolDefinition, type ToolContext, type ToolSideEffect } from './types.js';
 import {
-  registeredInputSchema,
+  writeControlInputSchema,
   registeredOutputSchema,
   getRawInput,
   parseWriteMode,
   omitWriteControls,
   writePlanResponse,
+  type WriteMode,
 } from './transaction.js';
 import { type ToolProfile, getEnabledProfiles } from '../config/profiles.js';
 import { withActiveDocument, isEmptyTarget, documentTargetSchema } from './focus-lock.js';
-import { ZodError, type z } from 'zod';
+import { z, ZodError } from 'zod';
 import { SERVER_VERSION } from '../config/version.js';
+import { getGlobalMetricsCollector, type ObservabilityCategory } from '../observability/index.js';
+import { type RemoteIdentity } from '../remote/scope.js';
+import { type RemoteRiskLevel } from '../remote/protocol.js';
+import { type RemoteGatewayToolResult } from '../remote/gateway.js';
 
 // ── Structured error codes ────────────────────────────────────────────────
 
@@ -23,6 +28,7 @@ export const ErrorCodes = {
   INVALID_INPUT: 'ERR_INVALID_INPUT',
   TOOL_OUTPUT_INVALID: 'ERR_TOOL_OUTPUT_INVALID',
   FORBIDDEN_SCOPE: 'ERR_FORBIDDEN_SCOPE',
+  REMOTE_RELAY: 'ERR_REMOTE_RELAY',
 } as const;
 
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];
@@ -37,6 +43,60 @@ export interface StructuredError {
 const READ_ALL_SCOPE = 'easyeda:read';
 const WRITE_ALL_SCOPE = 'easyeda:write';
 
+const REMOTE_RELAY_CONTROL_SHAPE = {
+  remoteSessionId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('Paired Remote Relay session id. Optional when MCP_REMOTE_SESSION_ID is configured.'),
+  remoteApprovalId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('Approved Remote Relay action id required for write, export, and destructive calls.'),
+};
+
+/**
+ * Schema published to the MCP SDK for a tool.
+ *
+ * The SDK validates arguments against the REGISTERED schema and strips any key
+ * it does not declare BEFORE this registry's wrapper runs. Two families of
+ * control keys therefore have to be declared here even though no tool carries
+ * them in its own `inputSchema`:
+ *   - `writeMode` / relaxed `confirmWrite` / `document` (write transactions and
+ *     headless multi-tab targeting) — added by `writeControlInputSchema`.
+ *   - `remoteSessionId` / `remoteApprovalId` (Remote Relay pairing/approval).
+ * Per-call validation still runs against the tool's own `inputSchema`, so no
+ * validation is lost by publishing the widened schema.
+ */
+function registeredInputSchema(tool: ToolDefinition, context: ToolContext): z.ZodType {
+  const base = writeControlInputSchema(tool);
+  if (context.config.MCP_BRIDGE_BACKEND !== 'remote_relay') return base;
+  if (base instanceof z.ZodObject) {
+    return (base as z.ZodObject<z.ZodRawShape>).safeExtend(REMOTE_RELAY_CONTROL_SHAPE);
+  }
+  return z.intersection(base, z.object(REMOTE_RELAY_CONTROL_SHAPE));
+}
+
+type RemoteGatewayFailure = Extract<RemoteGatewayToolResult, { ok: false }>;
+
+class RemoteRelayRouteError extends Error {
+  constructor(readonly failure: RemoteGatewayFailure) {
+    super(`Remote relay ${failure.code}: ${failure.message}`);
+    this.name = 'RemoteRelayRouteError';
+  }
+}
+
+function categoryForTool(tool: ToolDefinition): ObservabilityCategory {
+  if (tool.group === 'diagnostics') return 'diagnostics';
+  if (tool.group === 'export') return 'export';
+  if (tool.group === 'bom' && tool.name.includes('sourcing')) return 'vendor-api';
+  if (tool.group === 'drc-erc' || tool.group === 'pcb-constraints') return 'analysis';
+  if (tool.group === 'pcb-write') return tool.confirmWrite ? 'bridge-write' : 'analysis';
+  if (tool.confirmWrite) return 'bridge-write';
+  return 'analysis';
+}
+
 function parseToolScopes(value: unknown): Set<string> | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -50,32 +110,40 @@ function parseToolScopes(value: unknown): Set<string> | null {
   );
 }
 
-export function getRequiredToolScopes(tool: ToolDefinition): string[] {
+const STATIC_GROUP_SCOPES: Partial<Record<ToolDefinition['group'], string[]>> = {
+  diagnostics: ['diagnostics:read'],
+  'drc-erc': ['checks:read'],
+  board: ['pcb:read'],
+  'pcb-constraints': ['pcb:read'],
+  'pcb-write': ['pcb:write'],
+  export: ['export:write'],
+  visual: ['schematic:read', 'pcb:read'],
+  'design-rules': ['design-rules:read'],
+  workflows: ['schematic:write'],
+  simulation: ['simulation:read'],
+};
+
+function specialToolScopes(tool: ToolDefinition): string[] | undefined {
   if (tool.name === 'easyeda_execute') return ['bridge:execute'];
   if (tool.name === 'easyeda_api_call') return [tool.confirmWrite ? 'api:write' : 'api:read'];
   if (tool.name === 'easyeda_api_inventory' || tool.name === 'easyeda_component_probe') {
     return ['api:read'];
   }
+  return undefined;
+}
 
-  switch (tool.group) {
-    case 'diagnostics':
-      return ['diagnostics:read'];
-    case 'schematic':
-      return [tool.confirmWrite ? 'schematic:write' : 'schematic:read'];
-    case 'bom':
-      return [tool.name.includes('sourcing') ? 'bom:source' : 'bom:read'];
-    case 'drc-erc':
-      return ['checks:read'];
-    case 'board':
-    case 'pcb-constraints':
-      return ['pcb:read'];
-    case 'pcb-write':
-      return ['pcb:write'];
-    case 'export':
-      return ['export:write'];
-    default:
-      return [tool.confirmWrite ? WRITE_ALL_SCOPE : READ_ALL_SCOPE];
+export function getRequiredToolScopes(tool: ToolDefinition): string[] {
+  const special = specialToolScopes(tool);
+  if (special) return special;
+  const staticScopes = STATIC_GROUP_SCOPES[tool.group];
+  if (staticScopes) return staticScopes;
+  if (tool.group === 'schematic') {
+    return [tool.confirmWrite ? 'schematic:write' : 'schematic:read'];
   }
+  if (tool.group === 'bom') return [tool.name.includes('sourcing') ? 'bom:source' : 'bom:read'];
+  if (tool.group === 'catalog') return [tool.confirmWrite ? 'catalog:write' : 'catalog:read'];
+  if (tool.group === 'project') return [tool.confirmWrite ? 'project:write' : 'project:read'];
+  return [tool.confirmWrite ? WRITE_ALL_SCOPE : READ_ALL_SCOPE];
 }
 
 function hasRequiredToolScopes(
@@ -99,6 +167,20 @@ function hasRequiredToolScopes(
 /**
  * Build a structured error content block for MCP responses.
  */
+/** Shallow-copies `value` without `fields` — used to drop large duplicate
+ *  payloads (e.g. a base64 image) from structuredContent/text once they've
+ *  already been extracted into a dedicated content block. See
+ *  `ToolDefinition.imageContentOmitFields`. */
+function omitFields(value: unknown, fields: string[]): unknown {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value;
+  const omit = new Set(fields);
+  const result: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    if (!omit.has(key)) result[key] = val;
+  }
+  return result;
+}
+
 function structuredErrorResponse(error: StructuredError) {
   return {
     isError: true,
@@ -132,6 +214,439 @@ function bridgeDisconnectedResponse(
     ].join('\n'),
     details: { host, port },
   });
+}
+
+type McpHandlerAuthInfo = {
+  clientId?: string;
+  scopes?: string[];
+  expiresAt?: number;
+  extra?: Record<string, unknown>;
+};
+
+type McpHandlerExtra = {
+  // v1 and retained 2025-era context shape.
+  authInfo?: McpHandlerAuthInfo;
+  requestInfo?: { headers?: unknown };
+  // SDK v2 exposes the HTTP request context under `http` while retaining
+  // the same 2025-era wire lifecycle unless modern serving is explicitly enabled.
+  http?: {
+    authInfo?: McpHandlerAuthInfo;
+    req?: { headers?: unknown };
+  };
+};
+
+function readHeader(headers: unknown, name: string): string | undefined {
+  const lower = name.toLowerCase();
+  if (headers && typeof headers === 'object' && 'get' in headers) {
+    const value = (headers as { get: (key: string) => string | null | undefined }).get(name);
+    return value ?? undefined;
+  }
+  if (headers && typeof headers === 'object') {
+    const record = headers as Record<string, unknown>;
+    const value = record[name] ?? record[lower];
+    const firstValue = Array.isArray(value) ? value[0] : value;
+    if (typeof firstValue === 'string') return firstValue;
+    if (typeof firstValue === 'number' || typeof firstValue === 'boolean')
+      return String(firstValue);
+  }
+  return undefined;
+}
+
+function normalizeRemoteScope(scope: string): string {
+  return scope
+    .trim()
+    .replace(/^easyeda:/, 'easyeda.')
+    .replace('project-admin', 'project_admin');
+}
+
+function parseRemoteScopes(value: unknown): RemoteIdentity['scopes'] {
+  if (typeof value !== 'string') return [];
+  return value
+    .split(/[\s,]+/)
+    .map(normalizeRemoteScope)
+    .filter(Boolean) as RemoteIdentity['scopes'];
+}
+
+function handlerAuthInfo(extra: McpHandlerExtra | undefined): McpHandlerAuthInfo | undefined {
+  return extra?.authInfo ?? extra?.http?.authInfo;
+}
+
+function handlerHeaders(extra: McpHandlerExtra | undefined): unknown {
+  return extra?.requestInfo?.headers ?? extra?.http?.req?.headers;
+}
+
+function remoteIdentityFromExtra(extra: unknown): RemoteIdentity | undefined {
+  const handlerExtra = extra as McpHandlerExtra | undefined;
+  const auth = handlerAuthInfo(handlerExtra);
+  if (auth) {
+    const claims = auth.extra ?? {};
+    let userId = auth.clientId;
+    if (typeof claims.userId === 'string') userId = claims.userId;
+    if (typeof claims.sub === 'string') userId = claims.sub;
+    if (!userId) return undefined;
+    return {
+      userId,
+      scopes: (auth.scopes ?? []).map(normalizeRemoteScope) as RemoteIdentity['scopes'],
+      expiresAt: auth.expiresAt ? new Date(auth.expiresAt * 1000) : undefined,
+    };
+  }
+
+  const headers = handlerHeaders(handlerExtra);
+  const userId = readHeader(headers, 'x-remote-user-id');
+  if (!userId) return undefined;
+  const expiresAtHeader = readHeader(headers, 'x-remote-expires-at');
+  return {
+    userId,
+    scopes: parseRemoteScopes(readHeader(headers, 'x-remote-scopes') ?? 'easyeda.read'),
+    expiresAt: expiresAtHeader ? new Date(expiresAtHeader) : undefined,
+  };
+}
+
+function rawRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function omitRemoteRelayControls(input: unknown): unknown {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return input;
+  const {
+    remoteSessionId: _remoteSessionId,
+    remoteApprovalId: _remoteApprovalId,
+    ...domainInput
+  } = input as Record<string, unknown>;
+  return domainInput;
+}
+
+function domainInputForTool(context: ToolContext, input: unknown): unknown {
+  return context.config.MCP_BRIDGE_BACKEND === 'remote_relay'
+    ? omitRemoteRelayControls(input)
+    : input;
+}
+
+export function sideEffectForTool(tool: ToolDefinition): ToolSideEffect {
+  return tool.sideEffect ?? (tool.confirmWrite ? 'design-mutation' : 'read-only');
+}
+
+/** Resolve a tool's Remote Relay risk tier using explicit side-effect policy precedence. */
+export function remoteRiskForTool(tool: ToolDefinition): RemoteRiskLevel {
+  if (tool.name === 'easyeda_execute') return 'destructive';
+  const sideEffect = sideEffectForTool(tool);
+  if (sideEffect === 'artifact-write') return 'export';
+  if (tool.risk === 'high') return 'destructive';
+  if (
+    sideEffect === 'design-mutation' ||
+    sideEffect === 'local-state-write' ||
+    sideEffect === 'external-action' ||
+    tool.confirmWrite ||
+    tool.risk === 'medium'
+  ) {
+    return 'write';
+  }
+  return 'read';
+}
+
+interface PreparedToolContext {
+  context: ToolContext;
+  release?: () => void;
+}
+
+async function contextForRemoteRelay(
+  context: ToolContext,
+  tool: ToolDefinition,
+  raw: unknown,
+  extra: unknown,
+  parsed: unknown,
+): Promise<PreparedToolContext> {
+  if (context.config.MCP_BRIDGE_BACKEND !== 'remote_relay') return { context };
+  const gateway = context.remote?.gateway;
+  if (!gateway) {
+    throw new Error('Remote relay backend requested but no RemoteGateway is configured.');
+  }
+
+  const controls = rawRecord(raw);
+  const configuredSessionId =
+    typeof context.config.MCP_REMOTE_SESSION_ID === 'string'
+      ? context.config.MCP_REMOTE_SESSION_ID
+      : '';
+  let sessionId =
+    typeof controls.remoteSessionId === 'string'
+      ? controls.remoteSessionId
+      : configuredSessionId || undefined;
+  const approvalId =
+    typeof controls.remoteApprovalId === 'string' ? controls.remoteApprovalId : undefined;
+  const identity = remoteIdentityFromExtra(extra);
+  const riskLevel = remoteRiskForTool(tool);
+  let grantId: string | undefined;
+
+  if (riskLevel !== 'read') {
+    const authorization = await gateway.authorizeToolInvocation({
+      identity,
+      sessionId,
+      toolName: tool.name,
+      riskLevel,
+      input: parsed,
+      approvalId,
+    });
+    if (!authorization.ok) throw new RemoteRelayRouteError(authorization);
+    sessionId = authorization.sessionId;
+    grantId = authorization.grantId;
+  }
+
+  return {
+    context: {
+      ...context,
+      bridge: {
+        ...context.bridge,
+        get connected() {
+          return true;
+        },
+        call: async <TParams, TResult>(
+          method: string,
+          params?: TParams,
+          opts?: { timeoutMs?: number; traceparent?: string },
+        ): Promise<TResult> => {
+          const result = await gateway.routeToolRequest({
+            identity,
+            sessionId,
+            toolName: method,
+            riskLevel,
+            input: params,
+            grantId,
+            deadlineMs: opts?.timeoutMs,
+          });
+          if (!result.ok) throw new RemoteRelayRouteError(result);
+          return result.result as TResult;
+        },
+      },
+    },
+    release: grantId ? () => void gateway.revokeInvocationGrant(grantId) : undefined,
+  };
+}
+
+function invalidWriteModeResponse(tool: ToolDefinition, error: ZodError) {
+  return structuredErrorResponse({
+    errorCode: ErrorCodes.INVALID_INPUT,
+    message: `Invalid writeMode for "${tool.name}": ${error.message}`,
+    details: { toolName: tool.name, issues: error.issues },
+  });
+}
+
+function forbiddenScopeResponse(
+  context: ToolContext,
+  tool: ToolDefinition,
+  requiredScopes: string[],
+) {
+  const allowedScopes = parseToolScopes(context.config.TOOL_SCOPES);
+  if (hasRequiredToolScopes(allowedScopes, requiredScopes)) return undefined;
+  return structuredErrorResponse({
+    errorCode: ErrorCodes.FORBIDDEN_SCOPE,
+    message: `Tool "${tool.name}" requires one of: ${requiredScopes.join(', ')}.`,
+    details: {
+      toolName: tool.name,
+      requiredScopes,
+      configuredScopes: allowedScopes ? Array.from(allowedScopes) : ['*'],
+    },
+  });
+}
+
+function writePlanningResponse(
+  context: ToolContext,
+  tool: ToolDefinition,
+  raw: Record<string, unknown>,
+  writeMode: WriteMode,
+  requiredScopes: string[],
+) {
+  if (!tool.confirmWrite || writeMode === 'apply') return undefined;
+  const domainInput = rawRecord(domainInputForTool(context, raw));
+  const parsedPlan = tool.inputSchema.safeParse({ ...domainInput, confirmWrite: true });
+  if (!parsedPlan.success) {
+    return structuredErrorResponse({
+      errorCode: ErrorCodes.INVALID_INPUT,
+      message: `Invalid input for "${tool.name}": ${parsedPlan.error.message}`,
+      details: { toolName: tool.name, issues: parsedPlan.error.issues },
+    });
+  }
+  return writePlanResponse(tool, writeMode, omitWriteControls(parsedPlan.data), requiredScopes);
+}
+
+function confirmWriteResponse(tool: ToolDefinition, raw: Record<string, unknown>) {
+  if (!tool.confirmWrite || raw.confirmWrite === true) return undefined;
+  if (tool.confirmationPolicy === 'apply-mode' && raw.mode !== 'apply') return undefined;
+  return structuredErrorResponse({
+    errorCode: ErrorCodes.CONFIRM_WRITE_REQUIRED,
+    message: `Tool "${tool.name}" can mutate design state and requires confirmWrite=true.`,
+    details: { toolName: tool.name, toolGroup: tool.group, risk: tool.risk },
+  });
+}
+
+async function executeToolWithMetrics(
+  context: ToolContext,
+  tool: ToolDefinition,
+  raw: Record<string, unknown>,
+  extra: unknown,
+  parsed: unknown,
+): Promise<unknown> {
+  const startedAt = Date.now();
+  let prepared: PreparedToolContext | undefined;
+  try {
+    prepared = await contextForRemoteRelay(context, tool, raw, extra, parsed);
+    // Headless targeting + write serialization (focus-lock): any tool given an
+    // explicit `document`, and every write tool (even untargeted), runs under
+    // the single-active-document lock so edits never interleave and a targeted
+    // edit auto-focuses its tab first. Reads without a target run directly
+    // (unlocked, concurrent).
+    const toolContext = prepared.context;
+    const targetParse = documentTargetSchema.safeParse(raw.document);
+    const target = targetParse.success ? targetParse.data : undefined;
+    const runHandler = () => tool.handler(toolContext, parsed);
+    const result =
+      tool.confirmWrite || !isEmptyTarget(target)
+        ? await withActiveDocument(toolContext, target, runHandler)
+        : await runHandler();
+    getGlobalMetricsCollector().recordTimed({
+      category: categoryForTool(tool),
+      name: tool.name,
+      durationMs: Date.now() - startedAt,
+      ok: true,
+    });
+    return result;
+  } catch (err) {
+    getGlobalMetricsCollector().recordTimed({
+      category: categoryForTool(tool),
+      name: tool.name,
+      durationMs: Date.now() - startedAt,
+      ok: false,
+    });
+    throw err;
+  } finally {
+    prepared?.release?.();
+  }
+}
+
+function legacyImageContent(data: unknown) {
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return undefined;
+  const structuredContent = data as Record<string, unknown>;
+  const imageBase64 = structuredContent.imageBase64;
+  if (typeof imageBase64 !== 'string' || imageBase64.length === 0) return undefined;
+  const imageMime = structuredContent.mime;
+  const { imageBase64: _omitted, ...textShape } = structuredContent;
+  return {
+    structuredContent,
+    content: [
+      {
+        type: 'image' as const,
+        data: imageBase64,
+        mimeType: typeof imageMime === 'string' ? imageMime : 'image/png',
+      },
+      { type: 'text' as const, text: JSON.stringify(textShape, null, 2) },
+    ],
+  };
+}
+
+function formatToolSuccess(tool: ToolDefinition, result: unknown) {
+  const output = tool.outputSchema.safeParse(result);
+  if (!output.success) {
+    return structuredErrorResponse({
+      errorCode: ErrorCodes.TOOL_OUTPUT_INVALID,
+      message: `Tool "${tool.name}" returned output that does not match its declared outputSchema.`,
+      details: { toolName: tool.name, issues: output.error.issues },
+    });
+  }
+
+  // Legacy image convention (local editor tools): a tool that does not declare
+  // `imageContent` but returns `imageBase64` + `mime` still gets a viewable MCP
+  // image content block, with the base64 dropped from the duplicated text JSON
+  // so a large blob is not paid for twice.
+  if (!tool.imageContent) {
+    const legacy = legacyImageContent(output.data);
+    if (legacy) return legacy;
+  }
+
+  const images = tool.imageContent?.(output.data) ?? [];
+  const responseData =
+    images.length > 0 && tool.imageContentOmitFields?.length
+      ? omitFields(output.data, tool.imageContentOmitFields)
+      : output.data;
+  const structuredContent =
+    typeof responseData === 'object' && responseData !== null
+      ? (responseData as Record<string, unknown>)
+      : { value: responseData };
+  return {
+    structuredContent,
+    content: [
+      { type: 'text' as const, text: JSON.stringify(responseData, null, 2) },
+      ...images.map((image) => ({
+        type: 'image' as const,
+        data: image.data,
+        mimeType: image.mimeType,
+      })),
+    ],
+  };
+}
+
+function toolFailureResponse(tool: ToolDefinition, context: ToolContext, err: unknown) {
+  if (err instanceof ZodError) {
+    return structuredErrorResponse({
+      errorCode: ErrorCodes.INVALID_INPUT,
+      message: `Invalid input for "${tool.name}": ${err.message}`,
+      details: { toolName: tool.name, issues: err.issues },
+    });
+  }
+
+  if (err instanceof RemoteRelayRouteError) {
+    return structuredErrorResponse({
+      errorCode: ErrorCodes.REMOTE_RELAY,
+      message: err.message,
+      details: {
+        toolName: tool.name,
+        remoteCode: err.failure.code,
+        status: err.failure.status,
+        approvalId: err.failure.approvalId,
+        approvalExpiresAt: err.failure.approvalExpiresAt,
+      },
+    });
+  }
+
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes('Bridge not connected') || msg.includes('Bridge disconnected')) {
+    return bridgeDisconnectedResponse(context.config.bridgeHost, String(context.config.bridgePort));
+  }
+
+  return structuredErrorResponse({
+    errorCode: ErrorCodes.TOOL_EXECUTION,
+    message: `Tool "${tool.name}" failed: ${msg}`,
+    details: { toolName: tool.name },
+  });
+}
+
+async function handleRegisteredToolCall(
+  tool: ToolDefinition,
+  context: ToolContext,
+  input: unknown,
+  extra: unknown,
+) {
+  try {
+    const raw = getRawInput(input);
+    const writeMode = parseWriteMode(raw);
+    if (writeMode instanceof ZodError) return invalidWriteModeResponse(tool, writeMode);
+
+    const requiredScopes = getRequiredToolScopes(tool);
+    const scopeError = forbiddenScopeResponse(context, tool, requiredScopes);
+    if (scopeError) return scopeError;
+
+    const planned = writePlanningResponse(context, tool, raw, writeMode, requiredScopes);
+    if (planned) return planned;
+
+    const confirmError = confirmWriteResponse(tool, raw);
+    if (confirmError) return confirmError;
+
+    const parsed = tool.inputSchema.parse(domainInputForTool(context, input) ?? {});
+    const result = await executeToolWithMetrics(context, tool, raw, extra, parsed);
+    return formatToolSuccess(tool, result);
+  } catch (err) {
+    return toolFailureResponse(tool, context, err);
+  }
 }
 
 // ── Tool metadata snapshot ────────────────────────────────────────────────
@@ -194,145 +709,11 @@ export class ToolRegistry {
         {
           title: tool.title,
           description: tool.description,
-          inputSchema: registeredInputSchema(tool),
+          inputSchema: registeredInputSchema(tool, context),
           outputSchema: registeredOutputSchema(tool),
           annotations: tool.annotations,
         },
-        async (input: unknown) => {
-          try {
-            const raw = getRawInput(input);
-            const writeMode = parseWriteMode(raw);
-            if (writeMode instanceof ZodError) {
-              return structuredErrorResponse({
-                errorCode: ErrorCodes.INVALID_INPUT,
-                message: `Invalid writeMode for "${tool.name}": ${writeMode.message}`,
-                details: { toolName: tool.name, issues: writeMode.issues },
-              });
-            }
-
-            // ── Capability scope gate ────────────────────────────
-            const allowedScopes = parseToolScopes(context.config.TOOL_SCOPES);
-            const requiredScopes = getRequiredToolScopes(tool);
-            if (!hasRequiredToolScopes(allowedScopes, requiredScopes)) {
-              return structuredErrorResponse({
-                errorCode: ErrorCodes.FORBIDDEN_SCOPE,
-                message: `Tool "${tool.name}" requires one of: ${requiredScopes.join(', ')}.`,
-                details: {
-                  toolName: tool.name,
-                  requiredScopes,
-                  configuredScopes: allowedScopes ? Array.from(allowedScopes) : ['*'],
-                },
-              });
-            }
-
-            // ── Write transaction planning / preview / verification ─────
-            if (tool.confirmWrite && writeMode !== 'apply') {
-              const parsedPlan = tool.inputSchema.safeParse({ ...raw, confirmWrite: true });
-              if (!parsedPlan.success) {
-                return structuredErrorResponse({
-                  errorCode: ErrorCodes.INVALID_INPUT,
-                  message: `Invalid input for "${tool.name}": ${parsedPlan.error.message}`,
-                  details: { toolName: tool.name, issues: parsedPlan.error.issues },
-                });
-              }
-              return writePlanResponse(
-                tool,
-                writeMode,
-                omitWriteControls(parsedPlan.data),
-                requiredScopes,
-              );
-            }
-
-            // ── confirmWrite gate for apply ─────────────────────────────
-            if (tool.confirmWrite && raw.confirmWrite !== true) {
-              return structuredErrorResponse({
-                errorCode: ErrorCodes.CONFIRM_WRITE_REQUIRED,
-                message: `Tool "${tool.name}" can mutate design state and requires confirmWrite=true.`,
-                details: { toolName: tool.name, toolGroup: tool.group, risk: tool.risk },
-              });
-            }
-
-            // ── Parse & execute ───────────────────────────────────────
-            const parsed = tool.inputSchema.parse(input ?? {});
-            // Headless targeting + write serialization (focus-lock): any tool given
-            // an explicit `document`, and every write tool (even untargeted), runs
-            // under the single-active-document lock so edits never interleave and a
-            // targeted edit auto-focuses its tab first. Reads without a target run
-            // directly (unlocked, concurrent).
-            const targetParse = documentTargetSchema.safeParse(raw.document);
-            const target = targetParse.success ? targetParse.data : undefined;
-            const runHandler = () => tool.handler(context, parsed);
-            const result =
-              tool.confirmWrite || !isEmptyTarget(target)
-                ? await withActiveDocument(context, target, runHandler)
-                : await runHandler();
-            const output = tool.outputSchema.safeParse(result);
-
-            if (!output.success) {
-              return structuredErrorResponse({
-                errorCode: ErrorCodes.TOOL_OUTPUT_INVALID,
-                message: `Tool "${tool.name}" returned output that does not match its declared outputSchema.`,
-                details: { toolName: tool.name, issues: output.error.issues },
-              });
-            }
-
-            const structuredContent =
-              typeof output.data === 'object' && output.data !== null
-                ? (output.data as Record<string, unknown>)
-                : { value: output.data };
-
-            // Image convention: if a tool output carries `imageBase64` + `mime`,
-            // surface it as a viewable MCP image content block (e.g. the editor
-            // screenshot tool) and omit the base64 from the duplicated text JSON
-            // so a large blob is not paid for twice.
-            const imageBase64 = structuredContent.imageBase64;
-            const imageMime = structuredContent.mime;
-            if (typeof imageBase64 === 'string' && imageBase64.length > 0) {
-              const { imageBase64: _omitted, ...textShape } = structuredContent;
-              return {
-                structuredContent,
-                content: [
-                  {
-                    type: 'image' as const,
-                    data: imageBase64,
-                    mimeType: typeof imageMime === 'string' ? imageMime : 'image/png',
-                  },
-                  { type: 'text' as const, text: JSON.stringify(textShape, null, 2) },
-                ],
-              };
-            }
-
-            return {
-              structuredContent,
-              content: [{ type: 'text' as const, text: JSON.stringify(output.data, null, 2) }],
-            };
-          } catch (err) {
-            // ── Zod validation errors ─────────────────────────────────
-            if (err instanceof ZodError) {
-              return structuredErrorResponse({
-                errorCode: ErrorCodes.INVALID_INPUT,
-                message: `Invalid input for "${tool.name}": ${err.message}`,
-                details: { toolName: tool.name, issues: err.issues },
-              });
-            }
-
-            // ── Bridge-disconnected interception ──────────────────────
-            const msg = err instanceof Error ? err.message : String(err);
-            if (msg.includes('Bridge not connected') || msg.includes('Bridge disconnected')) {
-              return bridgeDisconnectedResponse(
-                context.config.bridgeHost,
-                String(context.config.bridgePort),
-              );
-            }
-
-            // ── Generic execution error ───────────────────────────────
-            return structuredErrorResponse({
-              errorCode: ErrorCodes.TOOL_EXECUTION,
-              message: `Tool "${tool.name}" failed: ${msg}`,
-              details: { toolName: tool.name },
-            });
-          }
-        },
+        async (input: unknown, ctx: unknown) => handleRegisteredToolCall(tool, context, input, ctx),
       );
     }
   }

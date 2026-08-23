@@ -2,7 +2,89 @@ import { z } from 'zod';
 import { type ToolDefinition, type ToolContext } from './types.js';
 import { type EnvConfig } from '../config/env.js';
 import { validateNets } from '../net-validation/validation.js';
+import { type NetValidationIssue } from '../net-validation/errors.js';
+import {
+  type DeviceValidationEntry,
+  type NetValidationEntry,
+  type PinValidationMetadata,
+} from '../net-validation/schema.js';
+import { classifyNetType, classifyPinElectricalType } from '../net-validation/pin-classifier.js';
 import { analyzePowerTree } from '../power-tree/index.js';
+import {
+  classifyPostWriteQa,
+  collectNativeRuleRunsForPostWriteQa,
+} from '../workflows/schematic-post-write-qa.js';
+import { fetchComponentPins } from './schematic-helpers.js';
+import { normalizeSchematicNets } from '../schematic-model/index.js';
+
+/** Shared error/warning mapper for both the hand-authored and auto-extracted
+ *  semantic ERC tools — same NetValidationIssue shape, same response fields. */
+function mapSemanticIssue(issue: NetValidationIssue) {
+  return {
+    code: issue.code,
+    message: issue.message,
+    severity: issue.severity,
+    path: issue.path,
+    net_name: issue.netName,
+    component_ref: issue.componentRef,
+    pin: issue.pin,
+    remediation_hint: issue.remediationHint,
+    details: issue.details,
+  };
+}
+
+/**
+ * Extract nets + devices from the live schematic (schematic.listNets +
+ * schematic.listComponents + per-component pin fetch) and classify net/pin
+ * electrical types from naming conventions — see pin-classifier.ts for why
+ * EasyEDA's own pinType metadata isn't trusted as the primary source.
+ * Unclassified pins default to 'passive' so they never trigger a false
+ * floating-input/output-contention/missing-power finding.
+ */
+async function extractLiveSemanticNetlist(
+  ctx: ToolContext,
+  projectId: string,
+): Promise<{ nets: NetValidationEntry[]; devices: DeviceValidationEntry[] }> {
+  const netsResult = (await ctx.bridge.call('schematic.listNets', { projectId })) as Array<{
+    netName?: string;
+    nodes?: Array<{ component?: string; pin?: string }>;
+  }>;
+  const compsResult = (await ctx.bridge.call('schematic.listComponents', {
+    projectId,
+    limit: 500,
+    offset: 0,
+  })) as { items?: Array<{ primitiveId?: string; reference?: string }> };
+  const components = compsResult?.items ?? [];
+
+  const devices: DeviceValidationEntry[] = [];
+  for (const c of components) {
+    if (!c.primitiveId || !c.reference) continue;
+    let pins;
+    try {
+      pins = await fetchComponentPins(ctx, c.primitiveId);
+    } catch {
+      continue; // best-effort; skip components whose pins can't be read live
+    }
+    const devicePins: PinValidationMetadata[] = pins.map((p) => ({
+      pin: p.pinNumber,
+      name: p.pinName,
+      electricalType: classifyPinElectricalType(p.pinName, p.pinType) ?? 'passive',
+    }));
+    devices.push({ id: c.reference, ref: c.reference, pins: devicePins });
+  }
+
+  const nets: NetValidationEntry[] = normalizeSchematicNets(netsResult ?? []).map((net) => ({
+    id: net.id,
+    name: net.canonicalNetName,
+    type: classifyNetType(net.canonicalNetName),
+    nodes: net.nodes.map((node) => ({
+      deviceRef: node.componentRef,
+      pin: node.pin,
+    })),
+  }));
+
+  return { nets, devices };
+}
 
 function registerDrcErcTools(
   registry: { register: (def: ToolDefinition) => void },
@@ -12,7 +94,9 @@ function registerDrcErcTools(
     name: 'easyeda_drc_run',
     title: 'Run design rule check',
     description:
-      'Run design rule check (DRC) on the project to identify rule violations, clearance issues, and manufacturing constraints.',
+      "Run EasyEDA Pro's native PCB DRC and refresh its visible DRC panel. Requires a PCB document " +
+      'to be focused; otherwise returns an indeterminate not_available result with an actionable focus error. ' +
+      'Returns coarse severity counts; per-violation detail stays in EasyEDA Pro.',
     profile: 'core',
     evidence: ['official-docs'],
     risk: 'medium',
@@ -49,8 +133,9 @@ function registerDrcErcTools(
       total_violations: z.number().int().nonnegative(),
       error_count: z.number().int().nonnegative(),
       warning_count: z.number().int().nonnegative(),
-      passed: z.boolean(),
+      passed: z.boolean().nullable(),
       not_available: z.boolean().optional(),
+      error: z.string().optional(),
     }),
     handler: async (ctx: ToolContext, params: unknown) => {
       const { projectId, rules } = params as { projectId: string; rules?: string[] };
@@ -68,6 +153,7 @@ function registerDrcErcTools(
           totalViolations?: number;
           errorCount?: number;
           warningCount?: number;
+          passed?: boolean;
         };
         const violations = (data.violations ?? []).map((v) => ({
           rule: v.rule ?? '',
@@ -85,15 +171,19 @@ function registerDrcErcTools(
           net: v.net,
           component: v.component,
         }));
+        const errorCount =
+          data.errorCount ??
+          violations.filter((violation) => violation.severity === 'error').length;
+        const warningCount =
+          data.warningCount ??
+          violations.filter((violation) => violation.severity === 'warning').length;
         return {
           project_id: projectId,
           violations,
           total_violations: data.totalViolations ?? violations.length,
-          error_count: data.errorCount ?? violations.filter((v) => v.severity === 'error').length,
-          warning_count:
-            data.warningCount ?? violations.filter((v) => v.severity === 'warning').length,
-          passed:
-            (data.errorCount ?? violations.filter((v) => v.severity === 'error').length) === 0,
+          error_count: errorCount,
+          warning_count: warningCount,
+          passed: data.passed ?? errorCount === 0,
         };
       } catch (err) {
         return {
@@ -102,7 +192,7 @@ function registerDrcErcTools(
           total_violations: 0,
           error_count: 0,
           warning_count: 0,
-          passed: false,
+          passed: null,
           not_available: true,
           error: err instanceof Error ? err.message : String(err),
         };
@@ -114,9 +204,11 @@ function registerDrcErcTools(
     name: 'easyeda_erc_run',
     title: 'Run electrical rule check',
     description:
-      'Run electrical rule check (ERC) on the schematic to detect unconnected nets, short circuits, and electrical conflicts.',
+      "Run EasyEDA Pro's native schematic ERC and supplement coarse counts with inferred_floating_pins. " +
+      'Requires a schematic document to be focused; otherwise returns an indeterminate not_available result ' +
+      'with an actionable focus error. Native counts remain authoritative.',
     profile: 'core',
-    evidence: ['official-docs'],
+    evidence: ['official-docs', 'runtime-probe'],
     risk: 'medium',
     confirmWrite: false,
     group: 'drc-erc',
@@ -149,8 +241,19 @@ function registerDrcErcTools(
       total_violations: z.number().int().nonnegative(),
       error_count: z.number().int().nonnegative(),
       warning_count: z.number().int().nonnegative(),
-      passed: z.boolean(),
+      passed: z.boolean().nullable(),
+      inferred_floating_pins: z
+        .array(
+          z.object({
+            primitiveId: z.string(),
+            designator: z.string(),
+            pinNumber: z.string(),
+          }),
+        )
+        .optional(),
+      detail_source: z.enum(['inferred_partial', 'native_aggregate_only']).optional(),
       not_available: z.boolean().optional(),
+      error: z.string().optional(),
     }),
     handler: async (ctx: ToolContext, params: unknown) => {
       const { projectId, checks } = params as { projectId: string; checks?: string[] };
@@ -167,6 +270,12 @@ function registerDrcErcTools(
           totalViolations?: number;
           errorCount?: number;
           warningCount?: number;
+          inferredFloatingPins?: Array<{
+            primitiveId: string;
+            designator: string;
+            pinNumber: string;
+          }>;
+          detailSource?: 'inferred_partial' | 'native_aggregate_only';
         };
         const violations = (data.violations ?? []).map((v) => ({
           net: v.net,
@@ -191,6 +300,8 @@ function registerDrcErcTools(
             data.warningCount ?? violations.filter((v) => v.severity === 'warning').length,
           passed:
             (data.errorCount ?? violations.filter((v) => v.severity === 'error').length) === 0,
+          inferred_floating_pins: data.inferredFloatingPins,
+          detail_source: data.detailSource,
         };
       } catch (err) {
         return {
@@ -199,7 +310,7 @@ function registerDrcErcTools(
           total_violations: 0,
           error_count: 0,
           warning_count: 0,
-          passed: false,
+          passed: null,
           not_available: true,
           error: err instanceof Error ? err.message : String(err),
         };
@@ -371,20 +482,8 @@ function registerDrcErcTools(
         interfaces: parsed.interfaces,
       });
 
-      const mapIssue = (issue: (typeof result.errors)[number]) => ({
-        code: issue.code,
-        message: issue.message,
-        severity: issue.severity,
-        path: issue.path,
-        net_name: issue.netName,
-        component_ref: issue.componentRef,
-        pin: issue.pin,
-        remediation_hint: issue.remediationHint,
-        details: issue.details,
-      });
-
-      const errors = result.errors.map(mapIssue);
-      const warnings = result.warnings.map(mapIssue);
+      const errors = result.errors.map(mapSemanticIssue);
+      const warnings = result.warnings.map(mapSemanticIssue);
 
       return {
         project_id: parsed.projectId ?? '',
@@ -395,6 +494,76 @@ function registerDrcErcTools(
         errors,
         warnings,
       };
+    },
+  });
+
+  registry.register({
+    name: 'easyeda_semantic_erc_auto',
+    title: 'Auto-extract netlist and run semantic ERC',
+    description:
+      'Extract nets/devices/pins from the LIVE schematic and run semantic ERC — no hand-authored ' +
+      'netlist needed. Net/pin electrical types are INFERRED from naming conventions, not ' +
+      'verified — treat findings as a first-pass signal, not a substitute for semantic_erc_validate.',
+    profile: 'core',
+    evidence: ['inferred', 'runtime-probe'],
+    risk: 'low',
+    confirmWrite: false,
+    group: 'drc-erc',
+    version: '1.0.0',
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+    inputSchema: z.object({
+      projectId: z.string(),
+    }),
+    outputSchema: z.object({
+      project_id: z.string(),
+      passed: z.boolean(),
+      error_count: z.number().int().nonnegative(),
+      warning_count: z.number().int().nonnegative(),
+      total_issues: z.number().int().nonnegative(),
+      errors: z.array(semanticIssueSchema),
+      warnings: z.array(semanticIssueSchema),
+      inferred_net_count: z.number().int().nonnegative(),
+      inferred_device_count: z.number().int().nonnegative(),
+      not_available: z.boolean().optional(),
+      error: z.string().optional(),
+    }),
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const { projectId } = params as { projectId: string };
+      try {
+        const { nets, devices } = await extractLiveSemanticNetlist(ctx, projectId);
+        const result = validateNets({ nets, devices });
+        const errors = result.errors.map(mapSemanticIssue);
+        const warnings = result.warnings.map(mapSemanticIssue);
+        return {
+          project_id: projectId,
+          passed: result.valid,
+          error_count: errors.length,
+          warning_count: warnings.length,
+          total_issues: errors.length + warnings.length,
+          errors,
+          warnings,
+          inferred_net_count: nets.length,
+          inferred_device_count: devices.length,
+        };
+      } catch (err) {
+        return {
+          project_id: projectId,
+          passed: false,
+          error_count: 0,
+          warning_count: 0,
+          total_issues: 0,
+          errors: [],
+          warnings: [],
+          inferred_net_count: 0,
+          inferred_device_count: 0,
+          not_available: true,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
     },
   });
 
@@ -591,6 +760,159 @@ function registerDrcErcTools(
     },
   });
 
+  const qaViolationSchema = z.object({
+    rule: z.string().optional(),
+    description: z.string().optional(),
+    message: z.string().optional(),
+    severity: z.enum(['error', 'warning', 'info']).optional(),
+    net: z.string().optional(),
+    component: z.string().optional(),
+  });
+
+  const qaRunOverrideSchema = z.object({
+    not_available: z.boolean().optional(),
+    error: z.string().optional(),
+    violations: z.array(qaViolationSchema).optional(),
+    total_violations: z.number().int().nonnegative().optional(),
+    error_count: z.number().int().nonnegative().optional(),
+    warning_count: z.number().int().nonnegative().optional(),
+    passed: z.boolean().optional(),
+    inferred_floating_pins: z
+      .array(
+        z.object({
+          primitiveId: z.string().optional(),
+          designator: z.string().optional(),
+          pinNumber: z.string().optional(),
+        }),
+      )
+      .optional(),
+  });
+
+  registry.register({
+    name: 'easyeda_post_write_qa',
+    title: 'Classify post-write schematic QA results',
+    description:
+      'Run and classify post-write schematic QA after generated edits. Combines native DRC/ERC results ' +
+      'with policy-aware classification so duplicate net names, free networks, and unconnected pins are ' +
+      'reported as pass/fail/inconclusive instead of raw warning counts.',
+    profile: 'core',
+    evidence: ['runtime-probe', 'inferred'],
+    risk: 'medium',
+    confirmWrite: false,
+    group: 'drc-erc',
+    version: '1.0.0',
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+    inputSchema: z.object({
+      projectId: z.string(),
+      policy: z.enum(['circuit', 'diagnostic-fixture']).default('circuit'),
+      useNativeChecks: z.boolean().default(true),
+      manualDrcMessages: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Optional user-copied EasyEDA DRC log lines for classification when native details are unavailable',
+        ),
+      manualErcMessages: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Optional user-copied EasyEDA ERC log lines for classification when native details are unavailable',
+        ),
+      drc: qaRunOverrideSchema
+        .optional()
+        .describe('Optional explicit DRC result override for tests or log ingestion'),
+      erc: qaRunOverrideSchema
+        .optional()
+        .describe('Optional explicit ERC result override for tests or log ingestion'),
+    }),
+    outputSchema: z.object({
+      project_id: z.string(),
+      status: z.enum(['pass', 'fail', 'inconclusive']),
+      passed: z.boolean(),
+      policy: z.enum(['circuit', 'diagnostic-fixture']),
+      issue_count: z.number().int().nonnegative(),
+      fatal_count: z.number().int().nonnegative(),
+      warning_count: z.number().int().nonnegative(),
+      inconclusive_count: z.number().int().nonnegative(),
+      categories: z.record(z.string(), z.number().int().nonnegative()),
+      issues: z.array(
+        z.object({
+          source: z.enum(['drc', 'erc', 'layout', 'manual-log']),
+          category: z.string(),
+          severity: z.enum(['error', 'warning', 'info']),
+          fatal: z.boolean(),
+          message: z.string(),
+          rule: z.string().optional(),
+          net: z.string().optional(),
+          component: z.string().optional(),
+          remediation_hint: z.string(),
+        }),
+      ),
+      summary: z.string(),
+      detail_source: z.enum(['native', 'manual', 'override', 'mixed']).optional(),
+    }),
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const p = z
+        .object({
+          projectId: z.string(),
+          policy: z.enum(['circuit', 'diagnostic-fixture']).default('circuit'),
+          useNativeChecks: z.boolean().default(true),
+          manualDrcMessages: z.array(z.string()).optional(),
+          manualErcMessages: z.array(z.string()).optional(),
+          drc: qaRunOverrideSchema.optional(),
+          erc: qaRunOverrideSchema.optional(),
+        })
+        .parse(params ?? {});
+
+      const manualDrc = p.manualDrcMessages?.map((description) => ({
+        description,
+        severity: 'warning' as const,
+      }));
+      const manualErc = p.manualErcMessages?.map((description) => ({
+        description,
+        severity: 'warning' as const,
+      }));
+      let drc =
+        p.drc ??
+        (manualDrc ? { violations: manualDrc, total_violations: manualDrc.length } : undefined);
+      let erc =
+        p.erc ??
+        (manualErc ? { violations: manualErc, total_violations: manualErc.length } : undefined);
+      let nativeUsed = false;
+
+      if (p.useNativeChecks) {
+        const native = await collectNativeRuleRunsForPostWriteQa(ctx.bridge, p.projectId, {
+          drc: !drc,
+          erc: !erc,
+        });
+        if (!drc) drc = native.drc;
+        if (!erc) erc = native.erc;
+        nativeUsed = Boolean(native.drc || native.erc);
+      }
+
+      const summary = classifyPostWriteQa({ projectId: p.projectId, policy: p.policy, drc, erc });
+      const hasManual = Boolean(p.manualDrcMessages?.length || p.manualErcMessages?.length);
+      const hasOverride = Boolean(p.drc || p.erc);
+      return {
+        ...summary,
+        detail_source:
+          [nativeUsed, hasManual, hasOverride].filter(Boolean).length > 1
+            ? 'mixed'
+            : nativeUsed
+              ? 'native'
+              : hasManual
+                ? 'manual'
+                : hasOverride
+                  ? 'override'
+                  : undefined,
+      };
+    },
+  });
+
   registry.register({
     name: 'easyeda_rule_check_summary',
     title: 'Get rule check summary',
@@ -614,64 +936,69 @@ function registerDrcErcTools(
         total: z.number().int().nonnegative(),
         errors: z.number().int().nonnegative(),
         warnings: z.number().int().nonnegative(),
-        passed: z.boolean(),
+        passed: z.boolean().nullable(),
+        not_available: z.boolean().optional(),
+        error: z.string().optional(),
       }),
       erc: z.object({
         total: z.number().int().nonnegative(),
         errors: z.number().int().nonnegative(),
         warnings: z.number().int().nonnegative(),
-        passed: z.boolean(),
+        passed: z.boolean().nullable(),
+        not_available: z.boolean().optional(),
+        error: z.string().optional(),
       }),
-      overall_passed: z.boolean(),
+      overall_passed: z.boolean().nullable(),
       not_available: z.boolean().optional(),
+      error: z.string().optional(),
     }),
     handler: async (ctx: ToolContext, params: unknown) => {
       const { projectId } = params as { projectId: string };
-      try {
-        const [drcResult, ercResult] = await Promise.all([
-          ctx.bridge.call('design.drc', { projectId }),
-          ctx.bridge.call('design.erc', { projectId }),
-        ]);
-        const drc = drcResult as {
+      const [drcResult, ercResult] = await Promise.allSettled([
+        ctx.bridge.call('design.drc', { projectId }),
+        ctx.bridge.call('design.erc', { projectId }),
+      ]);
+
+      const normalize = (result: PromiseSettledResult<unknown>) => {
+        if (result.status === 'rejected') {
+          return {
+            total: 0,
+            errors: 0,
+            warnings: 0,
+            passed: null,
+            not_available: true as const,
+            error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+          };
+        }
+        const data = result.value as {
           totalViolations?: number;
           errorCount?: number;
           warningCount?: number;
         };
-        const erc = ercResult as {
-          totalViolations?: number;
-          errorCount?: number;
-          warningCount?: number;
-        };
-        const drcErrors = drc.errorCount ?? 0;
-        const drcWarnings = drc.warningCount ?? 0;
-        const ercErrors = erc.errorCount ?? 0;
-        const ercWarnings = erc.warningCount ?? 0;
+        const errors = data.errorCount ?? 0;
+        const warnings = data.warningCount ?? 0;
         return {
-          project_id: projectId,
-          drc: {
-            total: drc.totalViolations ?? drcErrors + drcWarnings,
-            errors: drcErrors,
-            warnings: drcWarnings,
-            passed: drcErrors === 0,
-          },
-          erc: {
-            total: erc.totalViolations ?? ercErrors + ercWarnings,
-            errors: ercErrors,
-            warnings: ercWarnings,
-            passed: ercErrors === 0,
-          },
-          overall_passed: drcErrors === 0 && ercErrors === 0,
+          total: data.totalViolations ?? errors + warnings,
+          errors,
+          warnings,
+          passed: errors === 0,
         };
-      } catch (err) {
-        return {
-          project_id: projectId,
-          drc: { total: 0, errors: 0, warnings: 0, passed: false },
-          erc: { total: 0, errors: 0, warnings: 0, passed: false },
-          overall_passed: false,
-          not_available: true,
-          error: err instanceof Error ? err.message : String(err),
-        };
-      }
+      };
+
+      const drc = normalize(drcResult);
+      const erc = normalize(ercResult);
+      const bothUnavailable = drc.passed === null && erc.passed === null;
+      const errors = [drc.error, erc.error].filter((value): value is string => Boolean(value));
+
+      return {
+        project_id: projectId,
+        drc,
+        erc,
+        overall_passed:
+          drc.passed === null || erc.passed === null ? null : drc.passed && erc.passed,
+        not_available: bothUnavailable ? true : undefined,
+        error: bothUnavailable ? [...new Set(errors)].join('; ') : undefined,
+      };
     },
   });
 }

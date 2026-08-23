@@ -123,6 +123,27 @@ describe('Board Tools', () => {
     });
   });
 
+  it('easyeda_board_stackup marks copper-count-only data as unavailable', async () => {
+    const tool = registry.get('easyeda_board_stackup');
+    bridgeCall.mockResolvedValue({
+      totalLayers: 2,
+      layers: [],
+      available: false,
+      source: 'copper_layer_count_only',
+    });
+
+    const result = await tool?.handler(context, { projectId: 'proj-123' });
+    expect(result).toMatchObject({
+      project_id: 'proj-123',
+      total_layers: 2,
+      layers: [],
+      data_source: 'copper_layer_count_only',
+      not_available: true,
+    });
+    expect(result?.board_thickness_mm).toBeUndefined();
+    expect(result?.error).toContain('only the copper-layer count was verified');
+  });
+
   it('easyeda_board_dimensions returns dimensions', async () => {
     const tool = registry.get('easyeda_board_dimensions');
     expect(tool).toBeDefined();
@@ -147,6 +168,27 @@ describe('Board Tools', () => {
     expect(result?.area_mm2).toBe(8000);
   });
 
+  it('easyeda_board_dimensions distinguishes a missing outline from a 0x0 board', async () => {
+    const tool = registry.get('easyeda_board_dimensions');
+    bridgeCall.mockResolvedValue({
+      widthMm: 0,
+      heightMm: 0,
+      mountingHoleCount: 0,
+      areaMm2: 0,
+      hasOutline: false,
+    });
+
+    const result = await tool?.handler(context, { projectId: 'proj-123' });
+    expect(result).toMatchObject({
+      project_id: 'proj-123',
+      width_mm: 0,
+      height_mm: 0,
+      has_outline: false,
+      not_available: true,
+    });
+    expect(result?.error).toContain('No board outline');
+  });
+
   it('easyeda_board_features returns feature counts', async () => {
     const tool = registry.get('easyeda_board_features');
     expect(tool).toBeDefined();
@@ -155,6 +197,8 @@ describe('Board Tools', () => {
       vias: 42,
       tracks: 156,
       zones: 8,
+      fills: 3,
+      regions: 2,
       pads: 320,
       components: 45,
     });
@@ -167,8 +211,27 @@ describe('Board Tools', () => {
     expect(result?.vias).toBe(42);
     expect(result?.tracks).toBe(156);
     expect(result?.zones).toBe(8);
+    expect(result?.fills).toBe(3);
+    expect(result?.regions).toBe(2);
     expect(result?.pads).toBe(320);
     expect(result?.components).toBe(45);
+  });
+
+  it('easyeda_board_features defaults missing Fill/Region counts to zero', async () => {
+    const tool = registry.get('easyeda_board_features');
+    bridgeCall.mockResolvedValue({ vias: 1, tracks: 2, zones: 3, pads: 4 });
+
+    const result = await tool?.handler(context, { projectId: 'proj-sparse' });
+
+    expect(result).toMatchObject({
+      project_id: 'proj-sparse',
+      vias: 1,
+      tracks: 2,
+      zones: 3,
+      fills: 0,
+      regions: 0,
+      pads: 4,
+    });
   });
 
   it('easyeda_board_layers returns not_available when bridge call fails', async () => {
@@ -228,6 +291,8 @@ describe('Board Tools', () => {
     expect(result?.vias).toBe(0);
     expect(result?.tracks).toBe(0);
     expect(result?.zones).toBe(0);
+    expect(result?.fills).toBe(0);
+    expect(result?.regions).toBe(0);
     expect(result?.pads).toBe(0);
     expect(result?.error).toBe('Bridge disconnected');
   });

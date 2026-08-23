@@ -5,7 +5,16 @@ import { promisify } from 'node:util';
 import { z } from 'zod';
 import { type ToolDefinition, type ToolContext } from './types.js';
 import { type EnvConfig } from '../config/env.js';
-import { planComponentGroupPlacement, planRoutePath } from '../pcb-layout/index.js';
+import {
+  nativePcbComponentRestoreProperty,
+  parsePcbComponentTransformState,
+  pcbComponentStateMatches,
+  planComponentGroupPlacement,
+  planPcbComponentTransform,
+  planRoutePath,
+  type PcbComponentTransformState,
+} from '../pcb-layout/index.js';
+import { getGlobalTransactionManager } from '../transactions/manager.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -99,25 +108,80 @@ const layoutRectSchema = z.object({
   heightMm: z.number().positive(),
   name: z.string().optional(),
 });
-const layoutIssueSchema = z.object({
+export const layoutIssueSchema = z.object({
   code: z.string(),
   severity: z.enum(['error', 'warning', 'info']),
   message: z.string(),
   remediationHint: z.string(),
   details: z.record(z.string(), z.unknown()).optional(),
 });
-const layoutOperationSchema = z.object({
+export const layoutOperationSchema = z.object({
   method: z.string(),
   params: z.record(z.string(), z.unknown()),
 });
-const layoutApplyResultSchema = z.object({
+export const layoutApplyResultSchema = z.object({
   method: z.string(),
   success: z.boolean(),
   primitiveId: z.string().optional(),
   error: z.string().optional(),
 });
 
-async function applyLayoutOperations(
+const failClosedPcbWriteMetadata = {
+  profile: 'full',
+  evidence: ['runtime-probe'],
+  risk: 'high',
+  confirmWrite: true,
+  group: 'pcb-write',
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: false,
+  },
+} satisfies Pick<
+  ToolDefinition,
+  'profile' | 'evidence' | 'risk' | 'confirmWrite' | 'group' | 'annotations'
+>;
+
+const failClosedPcbZoneInputSchema = z.object({
+  points: z.array(z.object({ x: z.number(), y: z.number() })),
+  layer: z.number(),
+  netName: z.string().optional(),
+  clearance: z.number().optional(),
+  confirmWrite: z
+    .literal(true)
+    .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
+});
+
+const failClosedPcbZoneOutputSchema = z.object({
+  success: z.boolean(),
+  not_available: z.boolean().optional(),
+  error: z.string().optional(),
+  remediation: z.string().optional(),
+});
+
+const failClosedPcbZoneTool = {
+  name: 'easyeda_pcb_add_zone',
+  title: 'Add PCB copper zone/pour (unavailable)',
+  description:
+    'PCB copper-zone creation is unavailable because the verified EasyEDA Pro runtime requires ' +
+    'a complete native argument contract that this integration has not yet recovered. This tool ' +
+    'fails closed and does not call the bridge.',
+  ...failClosedPcbWriteMetadata,
+  version: '2.0.0',
+  inputSchema: failClosedPcbZoneInputSchema,
+  outputSchema: failClosedPcbZoneOutputSchema,
+  handler: async () => ({
+    success: false,
+    not_available: true,
+    error: 'PCB copper-zone creation is not supported by the verified EasyEDA Pro runtime.',
+    remediation:
+      'Create or edit the copper zone in EasyEDA Pro manually until the complete native zone-creation contract is live-verified.',
+  }),
+} satisfies ToolDefinition<
+  typeof failClosedPcbZoneInputSchema,
+  typeof failClosedPcbZoneOutputSchema
+>;
+
+export async function applyLayoutOperations(
   ctx: ToolContext,
   operations: Array<{ method: string; params: Record<string, unknown> }>,
 ) {
@@ -175,7 +239,7 @@ function registerPcbWriteTools(
       anchor: layoutPointSchema,
       columns: z.number().int().positive().optional(),
       spacingMm: z.number().nonnegative().optional(),
-      layer: z.number().int().default(1),
+      layer: z.union([z.literal(1), z.literal(2)]).default(1),
       minSpacingMm: z.number().nonnegative().optional(),
       components: z.array(
         z.object({
@@ -385,76 +449,79 @@ function registerPcbWriteTools(
 
   registry.register({
     name: 'easyeda_pcb_place_component',
-    title: 'Place component on PCB',
+    title: 'Place component on PCB (unavailable)',
     description:
-      'Place a component footprint on the active PCB layout. The real EasyEDA API (PCB_PrimitiveComponent.create) requires a library ITEM OBJECT, so pass libraryUuid + uuid (device or footprint) — a bare footprint string is a legacy fallback that generally will not resolve. layer: 1=TOP, 2=BOTTOM.',
+      'Direct PCB component creation is unavailable because the verified EasyEDA runtime does ' +
+      'not complete PCB_PrimitiveComponent.create(). This tool fails closed. Place the part in ' +
+      'the schematic, sync to PCB, confirm the native dialog, then reposition it with ' +
+      'easyeda_pcb_modify_component.',
     profile: 'full',
-    evidence: ['official-docs'],
+    evidence: ['runtime-probe'],
     risk: 'high',
     confirmWrite: true,
     group: 'pcb-write',
-    version: '1.1.0',
+    version: '2.0.0',
     annotations: {
       readOnlyHint: false,
       destructiveHint: false,
     },
     inputSchema: z.object({
-      libraryUuid: z.string().optional(),
-      uuid: z.string().optional(),
-      footprint: z.string().optional(),
+      footprint: z.string(),
       x: z.number(),
       y: z.number(),
       rotation: z.number().default(0),
       layer: z.number().default(1),
-      confirmWrite: z.literal(true),
+      confirmWrite: z
+        .literal(true)
+        .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
     }),
-    outputSchema: pcbWriteOutputSchema,
-    handler: async (ctx: ToolContext, params: unknown) => {
-      const p = params as {
-        libraryUuid?: string;
-        uuid?: string;
-        footprint?: string;
-        x: number;
-        y: number;
-        rotation: number;
-        layer: number;
-      };
-      return bridgeWrite(ctx, 'pcb.placeComponent', {
-        libraryUuid: p.libraryUuid,
-        uuid: p.uuid,
-        footprint: p.footprint,
-        x: p.x,
-        y: p.y,
-        rotation: p.rotation,
-        layer: p.layer,
-      });
-    },
+    outputSchema: z.object({
+      success: z.boolean(),
+      not_available: z.boolean().optional(),
+      error: z.string().optional(),
+      remediation: z.string().optional(),
+    }),
+    handler: async () => ({
+      success: false,
+      not_available: true,
+      error: 'Direct PCB component creation is not supported by the verified EasyEDA Pro runtime.',
+      remediation:
+        'Place the component in the schematic with addIntoPcb enabled, run ' +
+        'easyeda_schematic_sync_to_pcb, confirm the native import dialog, then reposition it with ' +
+        'easyeda_pcb_modify_component.',
+    }),
   });
 
   registry.register({
     name: 'easyeda_pcb_add_track',
     title: 'Add PCB track',
-    description: 'Draw a copper track/trace segment on the PCB board.',
+    description:
+      'Draw a copper track/trace on the PCB board. A multi-point path is written as one line ' +
+      'segment per consecutive point pair (all sharing netName, so they form one electrical ' +
+      'track — same coordinate/name merge model as schematic wires).',
     profile: 'full',
-    evidence: ['official-docs'],
+    evidence: ['runtime-probe'],
     risk: 'high',
     confirmWrite: true,
     group: 'pcb-write',
-    version: '1.0.0',
+    version: '2.0.0',
     annotations: {
       readOnlyHint: false,
       destructiveHint: false,
     },
     inputSchema: z.object({
-      points: z.array(z.object({ x: z.number(), y: z.number() })),
+      points: z.array(z.object({ x: z.number(), y: z.number() })).min(2),
       layer: z.number(),
       width: z.number(),
       netName: z.string().optional(),
-      confirmWrite: z.literal(true),
+      confirmWrite: z
+        .literal(true)
+        .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
     }),
     outputSchema: z.object({
       success: z.boolean(),
       primitiveId: z.string().optional(),
+      primitiveIds: z.array(z.string()).optional(),
       error: z.string().optional(),
     }),
     handler: async (ctx: ToolContext, params: unknown) => {
@@ -465,21 +532,19 @@ function registerPcbWriteTools(
         netName?: string;
       };
       try {
-        const flatPoints = p.points.flatMap((pt) => [pt.x, pt.y]);
         const result = await ctx.bridge.call<
           Record<string, unknown>,
-          { primitiveId?: string; result?: string }
+          { primitiveId?: string; primitiveIds?: string[] }
         >('pcb.addTrack', {
-          points: flatPoints,
+          points: p.points,
           layer: p.layer,
           width: p.width,
           netName: p.netName,
         });
-        const data = result as { primitiveId?: string; result?: string } | string;
         return {
           success: true,
-          primitiveId:
-            typeof data === 'string' ? data : (data?.primitiveId ?? data?.result ?? undefined),
+          primitiveId: result?.primitiveId,
+          primitiveIds: result?.primitiveIds,
         };
       } catch (err) {
         return {
@@ -493,9 +558,13 @@ function registerPcbWriteTools(
   registry.register({
     name: 'easyeda_pcb_add_via',
     title: 'Add PCB via',
-    description: 'Place a via to connect different copper layers on the PCB board.',
+    description:
+      'Place a via to connect different copper layers on the PCB board. outerDiameter/holeSize ' +
+      'are passed through to the native API unconverted (same native unit as x/y) — their ' +
+      'real-world scale was not independently verified against a known physical dimension, so ' +
+      'confirm the resulting via size visually before trusting it.',
     profile: 'full',
-    evidence: ['official-docs'],
+    evidence: ['runtime-probe'],
     risk: 'high',
     confirmWrite: true,
     group: 'pcb-write',
@@ -510,7 +579,9 @@ function registerPcbWriteTools(
       outerDiameter: z.number(),
       holeSize: z.number(),
       netName: z.string().optional(),
-      confirmWrite: z.literal(true),
+      confirmWrite: z
+        .literal(true)
+        .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
     }),
     outputSchema: z.object({
       success: z.boolean(),
@@ -551,13 +622,19 @@ function registerPcbWriteTools(
     },
   });
 
+  registry.register(failClosedPcbZoneTool);
+
   registry.register({
-    name: 'easyeda_pcb_add_zone',
-    title: 'Add PCB copper zone/pour',
-    description: 'Create a copper pour zone on a specific layer with clearance settings.',
+    name: 'easyeda_pcb_add_text',
+    title: 'Add PCB text/silkscreen label',
+    description:
+      'Place a text primitive on a PCB layer (typically Top/Bottom Silkscreen) — reference ' +
+      'labels, section titles, assembly notes. Signature recovered from PCB_PrimitiveString: ' +
+      "fontFamily must be a name the runtime's font list actually contains — " +
+      '"NotoSansMonoCJKsc-Regular" (the default) is live-verified to work.',
     profile: 'full',
-    evidence: ['official-docs'],
-    risk: 'high',
+    evidence: ['runtime-probe'],
+    risk: 'medium',
     confirmWrite: true,
     group: 'pcb-write',
     version: '1.0.0',
@@ -566,11 +643,22 @@ function registerPcbWriteTools(
       destructiveHint: false,
     },
     inputSchema: z.object({
-      points: z.array(z.object({ x: z.number(), y: z.number() })),
-      layer: z.number(),
-      netName: z.string().optional(),
-      clearance: z.number().optional(),
-      confirmWrite: z.literal(true),
+      layer: z.number().int().describe('Layer id, e.g. 3 = Top Silkscreen, 4 = Bottom Silkscreen'),
+      x: z.number(),
+      y: z.number(),
+      text: z.string().min(1),
+      fontFamily: z.string().optional(),
+      fontSize: z.number().positive().optional(),
+      lineWidth: z.number().positive().optional(),
+      alignMode: z.number().int().optional(),
+      rotation: z.number().optional(),
+      reverse: z.boolean().optional(),
+      expansion: z.number().optional(),
+      mirror: z.boolean().optional(),
+      locked: z.boolean().optional(),
+      confirmWrite: z
+        .literal(true)
+        .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
     }),
     outputSchema: z.object({
       success: z.boolean(),
@@ -579,21 +667,144 @@ function registerPcbWriteTools(
     }),
     handler: async (ctx: ToolContext, params: unknown) => {
       const p = params as {
-        points: Array<{ x: number; y: number }>;
         layer: number;
-        netName?: string;
-        clearance?: number;
+        x: number;
+        y: number;
+        text: string;
+        fontFamily?: string;
+        fontSize?: number;
+        lineWidth?: number;
+        alignMode?: number;
+        rotation?: number;
+        reverse?: boolean;
+        expansion?: number;
+        mirror?: boolean;
+        locked?: boolean;
       };
       try {
-        const flatPoints = p.points.flatMap((pt) => [pt.x, pt.y]);
         const result = await ctx.bridge.call<
           Record<string, unknown>,
           { primitiveId?: string; result?: string }
-        >('pcb.addZone', {
-          points: flatPoints,
+        >('pcb.addText', {
           layer: p.layer,
-          netName: p.netName,
-          clearance: p.clearance,
+          x: p.x,
+          y: p.y,
+          text: p.text,
+          fontFamily: p.fontFamily,
+          fontSize: p.fontSize,
+          lineWidth: p.lineWidth,
+          alignMode: p.alignMode,
+          rotation: p.rotation,
+          reverse: p.reverse,
+          expansion: p.expansion,
+          mirror: p.mirror,
+          locked: p.locked,
+        });
+        const data = result as { primitiveId?: string; result?: string } | string;
+        return {
+          success: true,
+          primitiveId:
+            typeof data === 'string' ? data : (data?.primitiveId ?? data?.result ?? undefined),
+        };
+      } catch (err) {
+        return {
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  });
+
+  registry.register({
+    name: 'easyeda_pcb_add_silkscreen_line',
+    title: 'Add PCB decorative/silkscreen line',
+    description:
+      'Draw a non-electrical line on the PCB (e.g. Top/Bottom Silkscreen) for section dividers ' +
+      'or board art — reuses the same PCB_PrimitiveLine primitive as add_track but with an empty ' +
+      'net name, so it never appears in the netlist or ratsnest. Pass a single segment ' +
+      '(startX/startY/endX/endY) or a connected `points` polyline for artwork (logos, ' +
+      'outlines, glyphs).',
+    profile: 'full',
+    evidence: ['runtime-probe'],
+    risk: 'medium',
+    confirmWrite: true,
+    group: 'pcb-write',
+    version: '1.1.0',
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+    },
+    inputSchema: z
+      .object({
+        layer: z
+          .number()
+          .int()
+          .describe('Layer id, e.g. 3 = Top Silkscreen, 4 = Bottom Silkscreen'),
+        startX: z.number().optional(),
+        startY: z.number().optional(),
+        endX: z.number().optional(),
+        endY: z.number().optional(),
+        points: z
+          .array(z.object({ x: z.number(), y: z.number() }))
+          .min(2)
+          .optional()
+          .describe(
+            'Connected polyline for silkscreen artwork. Mutually exclusive with startX/startY/endX/endY.',
+          ),
+        lineWidth: z.number().positive().optional(),
+        confirmWrite: z
+          .literal(true)
+          .describe(
+            'Must be the literal boolean true (not the string "true") to allow this write.',
+          ),
+      })
+      .refine(
+        (value) =>
+          value.points !== undefined ||
+          (value.startX !== undefined &&
+            value.startY !== undefined &&
+            value.endX !== undefined &&
+            value.endY !== undefined),
+        {
+          message: 'Provide either a `points` polyline or all four of startX, startY, endX, endY.',
+        },
+      ),
+    outputSchema: z.object({
+      success: z.boolean(),
+      primitiveId: z.string().optional(),
+      segmentIds: z.array(z.string()).optional(),
+      error: z.string().optional(),
+    }),
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const p = params as {
+        layer: number;
+        startX?: number;
+        startY?: number;
+        endX?: number;
+        endY?: number;
+        points?: Array<{ x: number; y: number }>;
+        lineWidth?: number;
+      };
+      // Polyline form routes to the multi-segment bridge method; the single
+      // segment form keeps the live-verified pcb.addSilkscreenLine contract.
+      if (p.points) {
+        return bridgeWrite(ctx, 'pcb.addSilkLine', {
+          points: flattenPoints(p.points),
+          layer: p.layer,
+          lineWidth: p.lineWidth ?? 0.15,
+        });
+      }
+      try {
+        const result = await ctx.bridge.call<
+          Record<string, unknown>,
+          { primitiveId?: string; result?: string }
+        >('pcb.addSilkscreenLine', {
+          layer: p.layer,
+          startX: p.startX,
+          startY: p.startY,
+          endX: p.endX,
+          endY: p.endY,
+          lineWidth: p.lineWidth,
         });
         const data = result as { primitiveId?: string; result?: string } | string;
         return {
@@ -612,39 +823,48 @@ function registerPcbWriteTools(
 
   registry.register({
     name: 'easyeda_pcb_delete_component',
-    title: 'Delete PCB components',
-    description: 'Delete components from the PCB layout by their primitive IDs.',
+    title: 'Delete PCB primitives',
+    description:
+      'Delete components, tracks, vias, or other PCB primitives by ID. Checks each id against ' +
+      'every deletable PCB class instead of assuming component, since PCB_PrimitiveComponent.' +
+      'delete() reports success for ids it does not own without deleting them.',
     profile: 'full',
-    evidence: ['official-docs'],
+    evidence: ['runtime-probe'],
     risk: 'high',
     confirmWrite: true,
     group: 'pcb-write',
-    version: '1.0.0',
+    version: '2.0.0',
     annotations: {
       readOnlyHint: false,
       destructiveHint: true,
     },
     inputSchema: z.object({
       primitiveIds: z.array(z.string()),
-      confirmWrite: z.literal(true),
+      confirmWrite: z
+        .literal(true)
+        .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
     }),
     outputSchema: z.object({
       success: z.boolean(),
       deletedCount: z.number().optional(),
+      deleted: z.array(z.string()).optional(),
+      notFound: z.array(z.string()).optional(),
       error: z.string().optional(),
     }),
     handler: async (ctx: ToolContext, params: unknown) => {
       const p = params as { primitiveIds: string[] };
       try {
-        await ctx.bridge.call<Record<string, unknown>, { primitiveId?: string; result?: string }>(
-          'pcb.deleteComponent',
-          {
-            primitiveIds: p.primitiveIds,
-          },
-        );
+        const result = await ctx.bridge.call<
+          Record<string, unknown>,
+          { success?: boolean; deletedCount?: number; deleted?: string[]; notFound?: string[] }
+        >('pcb.deleteComponent', {
+          primitiveIds: p.primitiveIds,
+        });
         return {
-          success: true,
-          deletedCount: p.primitiveIds.length,
+          success: result?.success ?? false,
+          deletedCount: result?.deletedCount,
+          deleted: result?.deleted,
+          notFound: result?.notFound,
         };
       } catch (err) {
         return {
@@ -654,56 +874,261 @@ function registerPcbWriteTools(
       }
     },
   });
+
+  const pcbComponentStateSchema = z.object({
+    primitiveId: z.string(),
+    designator: z.string().optional(),
+    side: z.enum(['top', 'bottom']),
+    layer: z.union([z.literal(1), z.literal(2)]),
+    xMil: z.number(),
+    yMil: z.number(),
+    rotationDeg: z.number(),
+    locked: z.boolean(),
+  });
+  const pcbComponentChangeSchema = z.object({
+    field: z.enum(['side', 'xMil', 'yMil', 'rotationDeg']),
+    before: z.union([z.string(), z.number()]),
+    after: z.union([z.string(), z.number()]),
+  });
+  const pcbComponentTransformInputSchema = z
+    .object({
+      primitiveId: z.string().min(1),
+      mode: z.enum(['preview', 'apply']).default('preview'),
+      side: z.enum(['top', 'bottom']).optional(),
+      xMil: z.number().finite().optional().describe('Absolute native PCB X coordinate in mils.'),
+      yMil: z.number().finite().optional().describe('Absolute native PCB Y coordinate in mils.'),
+      rotationDeg: z
+        .number()
+        .finite()
+        .optional()
+        .describe('Component rotation in degrees; normalized modulo 360.'),
+      confirmWrite: z.literal(true).optional(),
+    })
+    .strict()
+    .refine(
+      (value) =>
+        value.side !== undefined ||
+        value.xMil !== undefined ||
+        value.yMil !== undefined ||
+        value.rotationDeg !== undefined,
+      { message: 'At least one of side, xMil, yMil, or rotationDeg is required.' },
+    );
+  const pcbComponentTransformOutputSchema = z.object({
+    success: z.boolean(),
+    primitive_id: z.string(),
+    mode: z.enum(['preview', 'apply']),
+    applied: z.boolean(),
+    no_op: z.boolean(),
+    mirror_supported: z.literal(false),
+    before: pcbComponentStateSchema.optional(),
+    planned: pcbComponentStateSchema.optional(),
+    after: pcbComponentStateSchema.optional(),
+    restored: pcbComponentStateSchema.optional(),
+    changes: z.array(pcbComponentChangeSchema).optional(),
+    transaction_id: z.string().optional(),
+    transaction_state: z
+      .enum(['active', 'validated', 'committed', 'rolled-back', 'failed'])
+      .optional(),
+    rolled_back: z.boolean().optional(),
+    error: z.string().optional(),
+  });
+
+  async function readPcbComponentState(
+    ctx: ToolContext,
+    primitiveId: string,
+  ): Promise<PcbComponentTransformState> {
+    const listed = await ctx.bridge.call<
+      Record<string, never>,
+      { items?: unknown[]; total?: number }
+    >('pcb.listComponents', {});
+    const raw = Array.isArray(listed?.items)
+      ? listed.items.find(
+          (item) =>
+            !!item &&
+            typeof item === 'object' &&
+            !Array.isArray(item) &&
+            (item as Record<string, unknown>).primitiveId === primitiveId,
+        )
+      : undefined;
+    if (!raw) throw new Error(`PCB component ${primitiveId} was not found on the active PCB`);
+    const state = parsePcbComponentTransformState(raw);
+    if (!state) {
+      throw new Error(
+        `PCB component ${primitiveId} does not expose a complete supported transform state`,
+      );
+    }
+    return state;
+  }
 
   registry.register({
     name: 'easyeda_pcb_modify_component',
-    title: 'Modify PCB component properties',
-    description: 'Modify component properties in the PCB layout.',
+    title: 'Preview or apply a typed PCB component transform',
+    description:
+      'Preview or apply a PCB component transform for top/bottom side, native X/Y coordinates in mils, ' +
+      'and rotation in degrees. Apply requires confirmation, captures a transaction snapshot, verifies fresh ' +
+      'native read-back, and restores on mismatch. EasyEDA Pro has no independent component mirror field.',
     profile: 'full',
-    evidence: ['official-docs'],
+    evidence: ['official-docs', 'runtime-probe'],
     risk: 'high',
     confirmWrite: true,
+    confirmationPolicy: 'apply-mode',
     group: 'pcb-write',
-    version: '1.0.0',
+    version: '2.0.0',
     annotations: {
       readOnlyHint: false,
       destructiveHint: false,
+      idempotentHint: true,
     },
-    inputSchema: z.object({
-      primitiveId: z.string(),
-      property: z.record(z.string(), z.unknown()),
-      confirmWrite: z.literal(true),
-    }),
-    outputSchema: z.object({
-      success: z.boolean(),
-      error: z.string().optional(),
-    }),
+    inputSchema: pcbComponentTransformInputSchema,
+    outputSchema: pcbComponentTransformOutputSchema,
     handler: async (ctx: ToolContext, params: unknown) => {
-      const p = params as { primitiveId: string; property: Record<string, unknown> };
+      const parsed = pcbComponentTransformInputSchema.parse(params);
+      let before: PcbComponentTransformState | undefined;
       try {
-        await ctx.bridge.call<Record<string, unknown>, { primitiveId?: string; result?: string }>(
-          'pcb.modifyComponent',
-          {
-            primitiveId: p.primitiveId,
-            property: p.property,
-          },
-        );
-        return {
-          success: true,
+        before = await readPcbComponentState(ctx, parsed.primitiveId);
+        const plan = planPcbComponentTransform(before, parsed);
+        const base = {
+          primitive_id: parsed.primitiveId,
+          mode: parsed.mode,
+          mirror_supported: false as const,
+          before,
+          planned: plan.planned,
+          changes: plan.changes,
         };
-      } catch (err) {
+        if (parsed.mode === 'preview') {
+          return { ...base, success: true, applied: false, no_op: plan.changes.length === 0 };
+        }
+        if (parsed.confirmWrite !== true) {
+          return {
+            ...base,
+            success: false,
+            applied: false,
+            no_op: plan.changes.length === 0,
+            error: 'Apply mode requires confirmWrite=true.',
+          };
+        }
+        if (plan.changes.length === 0) {
+          return { ...base, success: true, applied: false, no_op: true, after: before };
+        }
+
+        const manager = getGlobalTransactionManager();
+        const transaction = manager.begin({
+          documentId: `active-pcb:${parsed.primitiveId}`,
+          label: `pcb-component-transform:${parsed.primitiveId}`,
+          maxOperations: 1,
+        });
+        try {
+          const executed = await manager.runModify(
+            transaction.id,
+            parsed.primitiveId,
+            {
+              getSnapshot: () => readPcbComponentState(ctx, parsed.primitiveId),
+              apply: async () => {
+                await ctx.bridge.call('pcb.modifyComponent', {
+                  primitiveId: parsed.primitiveId,
+                  property: plan.nativeProperty,
+                });
+                const readBack = await readPcbComponentState(ctx, parsed.primitiveId);
+                if (!pcbComponentStateMatches(readBack, plan.planned)) {
+                  throw new Error(
+                    `PCB component read-back did not match the requested transform for ${parsed.primitiveId}`,
+                  );
+                }
+                return readBack;
+              },
+              restore: async (snapshot) => {
+                const previous = snapshot as PcbComponentTransformState;
+                await ctx.bridge.call('pcb.modifyComponent', {
+                  primitiveId: parsed.primitiveId,
+                  property: nativePcbComponentRestoreProperty(previous),
+                });
+              },
+            },
+            'pcb-primitive',
+          );
+          await manager.validate(transaction.id, [
+            {
+              name: 'pcb-component-read-back',
+              run: () => {
+                const after = executed.operation.afterSnapshot as
+                  PcbComponentTransformState | undefined;
+                const passed = !!after && pcbComponentStateMatches(after, plan.planned);
+                return {
+                  gate: 'pcb-component-read-back',
+                  passed,
+                  message: passed
+                    ? 'PCB component transform matched the requested state.'
+                    : 'PCB component transform read-back was incomplete or mismatched.',
+                };
+              },
+            },
+          ]);
+          const committed = manager.commit(transaction.id);
+          return {
+            ...base,
+            success: true,
+            applied: true,
+            no_op: false,
+            after: executed.operation.afterSnapshot as PcbComponentTransformState,
+            transaction_id: transaction.id,
+            transaction_state: committed.state,
+            rolled_back: false,
+          };
+        } catch (error) {
+          let rolledBack = false;
+          let transactionState: 'rolled-back' | 'failed' = 'failed';
+          let restored: PcbComponentTransformState | undefined;
+          let rollbackError: string | undefined;
+          try {
+            const rollback = await manager.rollback(transaction.id, {
+              restore: async (operation) => {
+                const snapshot = operation.beforeSnapshot as PcbComponentTransformState;
+                await ctx.bridge.call('pcb.modifyComponent', {
+                  primitiveId: parsed.primitiveId,
+                  property: nativePcbComponentRestoreProperty(snapshot),
+                });
+              },
+              verify: async (operation) => {
+                const snapshot = operation.beforeSnapshot as PcbComponentTransformState;
+                const current = await readPcbComponentState(ctx, parsed.primitiveId);
+                return pcbComponentStateMatches(current, snapshot);
+              },
+            });
+            rolledBack = rollback.transaction.rollbackComplete === true;
+            transactionState =
+              rollback.transaction.state === 'rolled-back' ? 'rolled-back' : 'failed';
+            if (rolledBack) restored = await readPcbComponentState(ctx, parsed.primitiveId);
+          } catch (rollbackFailure) {
+            rollbackError =
+              rollbackFailure instanceof Error ? rollbackFailure.message : String(rollbackFailure);
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          return {
+            ...base,
+            success: false,
+            applied: false,
+            no_op: false,
+            transaction_id: transaction.id,
+            transaction_state: transactionState,
+            rolled_back: rolledBack,
+            ...(restored ? { restored } : {}),
+            error: rollbackError ? `${message}; rollback failed: ${rollbackError}` : message,
+          };
+        }
+      } catch (error) {
         return {
           success: false,
-          error: err instanceof Error ? err.message : String(err),
+          primitive_id: parsed.primitiveId,
+          mode: parsed.mode,
+          applied: false,
+          no_op: false,
+          mirror_supported: false,
+          ...(before ? { before } : {}),
+          error: error instanceof Error ? error.message : String(error),
         };
       }
     },
   });
-
-  // -------------------------------------------------------------------------
-  // v0.6.0 PCB authoring + import tools (real EasyEDA Pro class/method names,
-  // confirmed against @jlceda/pro-api-types).
-  // -------------------------------------------------------------------------
 
   registry.register({
     name: 'easyeda_pcb_add_board_outline',
@@ -938,39 +1363,6 @@ function registerPcbWriteTools(
         reverse: p.reverse,
         expansion: p.expansion,
         mirror: p.mirror,
-      });
-    },
-  });
-
-  registry.register({
-    name: 'easyeda_pcb_add_silkscreen_line',
-    title: 'Add silkscreen line/path',
-    description:
-      'Draw silkscreen artwork (logos, outlines, glyphs) as connected line segments via PCB_PrimitiveLine on layer 3 (top) or 4 (bottom). Provide a points polyline.',
-    profile: 'full',
-    evidence: ['official-docs'],
-    risk: 'high',
-    confirmWrite: true,
-    group: 'pcb-write',
-    version: '1.0.0',
-    annotations: { readOnlyHint: false, destructiveHint: false },
-    inputSchema: z.object({
-      points: z.array(z.object({ x: z.number(), y: z.number() })).min(2),
-      layer: z.number().default(3),
-      lineWidth: z.number().default(0.15),
-      confirmWrite: z.literal(true),
-    }),
-    outputSchema: pcbWriteOutputSchema,
-    handler: async (ctx: ToolContext, params: unknown) => {
-      const p = params as {
-        points: Array<{ x: number; y: number }>;
-        layer?: number;
-        lineWidth?: number;
-      };
-      return bridgeWrite(ctx, 'pcb.addSilkLine', {
-        points: flattenPoints(p.points),
-        layer: p.layer ?? 3,
-        lineWidth: p.lineWidth ?? 0.15,
       });
     },
   });

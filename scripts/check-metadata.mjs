@@ -11,6 +11,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { collectExtensionMetadataErrors } from './extension-metadata-policy.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -34,9 +35,25 @@ function warn(msg) {
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const serverJson = JSON.parse(fs.readFileSync(path.join(root, 'server.json'), 'utf8'));
 const versionTs = fs.readFileSync(path.join(root, 'src', 'config', 'version.ts'), 'utf8');
+const cliSourcePath = path.join(root, 'src', 'index.ts');
+const cliSource = fs.readFileSync(cliSourcePath, 'utf8');
+const cliDistPath = path.join(root, 'dist', 'index.js');
+const cliDist = fs.existsSync(cliDistPath) ? fs.readFileSync(cliDistPath, 'utf8') : null;
 const extJsonPath = path.join(root, 'easyeda-bridge-extension', 'extension.json');
 const extJson = fs.existsSync(extJsonPath)
   ? JSON.parse(fs.readFileSync(extJsonPath, 'utf8'))
+  : null;
+const extensionPackageJsonPath = path.join(root, 'easyeda-bridge-extension', 'package.json');
+const extensionPackageJson = fs.existsSync(extensionPackageJsonPath)
+  ? JSON.parse(fs.readFileSync(extensionPackageJsonPath, 'utf8'))
+  : null;
+const extensionSourcePath = path.join(root, 'easyeda-bridge-extension', 'src', 'index.ts');
+const extensionSource = fs.existsSync(extensionSourcePath)
+  ? fs.readFileSync(extensionSourcePath, 'utf8')
+  : null;
+const claudePluginJsonPath = path.join(root, '.claude-plugin', 'plugin.json');
+const claudePluginJson = fs.existsSync(claudePluginJsonPath)
+  ? JSON.parse(fs.readFileSync(claudePluginJsonPath, 'utf8'))
   : null;
 const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
 
@@ -69,13 +86,14 @@ if (!tsMatch) {
   );
 }
 
-// extension.json version (if present)
-if (extJson) {
-  if (extJson.version !== expectedVersion) {
-    error(
-      `easyeda-bridge-extension/extension.json version "${extJson.version}" !== package.json "${expectedVersion}"`,
-    );
-  }
+for (const metadataError of collectExtensionMetadataErrors({
+  productVersion: expectedVersion,
+  extensionManifest: extJson,
+  pluginManifest: claudePluginJson,
+  extensionPackage: extensionPackageJson,
+  extensionSource,
+})) {
+  error(metadataError);
 }
 
 // ── 3. Package name consistency ─────────────────────────────────────────────
@@ -88,13 +106,27 @@ if (mcpName && serverJson.name !== mcpName) {
 
 // ── 4. Binary / command consistency ─────────────────────────────────────────
 
-const binName = Object.keys(pkg.bin || {})[0] || '';
+const binEntries = Object.entries(pkg.bin || {});
+const binName = binEntries[0]?.[0] || '';
+const binTarget = binEntries[0]?.[1] || '';
 if (binName) {
   // Check README uses correct npx command
   const npxPattern = `npx ${binName}`;
   const readmeNpxCount = (readme.match(new RegExp(npxPattern, 'g')) || []).length;
   if (readmeNpxCount === 0) {
     warn(`README.md does not reference "npx ${binName}" — install command may be outdated`);
+  }
+
+  if (binTarget !== 'dist/index.js') {
+    error(`package.json bin target "${binTarget}" should be "dist/index.js"`);
+  }
+
+  if (!cliSource.startsWith('#!/usr/bin/env node')) {
+    error('src/index.ts must start with #!/usr/bin/env node so npx works on Windows');
+  }
+
+  if (cliDist !== null && !cliDist.startsWith('#!/usr/bin/env node')) {
+    error('dist/index.js must start with #!/usr/bin/env node before publishing');
   }
 }
 

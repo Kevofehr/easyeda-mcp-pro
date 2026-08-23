@@ -1,3 +1,34 @@
+// The loader: socket lifecycle, handshake, heartbeat and menu glue for the
+// MCP bridge extension. Every actual EasyEDA API interaction lives in the
+// dispatcher module (dispatcher.ts), which is baked in here as the fallback
+// and can be hot-swapped over the bridge in dev mode without re-importing
+// the .eext.
+import {
+  BRIDGE_PORT,
+  getLocalBridgeConnectionAttempts,
+  hasHeartbeatTimedOut,
+  HEARTBEAT_INTERVAL_MS,
+  isServerActivityMessage,
+  reconnectDelayMs,
+  REGISTER_OPEN_CALLBACK_TIMEOUT_MS,
+  shouldReconnectAfterSocketFailure,
+} from './connection-policy.js';
+import {
+  RemoteRelayClient,
+  type RemoteApprovalDecision,
+  type RemoteApprovalPrompt,
+  type RemoteRelayMode,
+} from './remote-client.js';
+import { createDispatcher } from './dispatcher.js';
+import { normalizeCanvasBinaryResult } from './capture-binary-result.js';
+import type { Dispatcher, DispatcherToolkit } from './toolkit.js';
+import {
+  createRuntimeTimers,
+  type EasyedaTimerApi,
+  type RuntimeTimerHandle,
+} from './runtime-timers.js';
+import { isRecord, log, readPath, readPathParent, type JsonValue } from './utils.js';
+
 declare const eda: EasyedaGlobal | undefined;
 declare const EDA: unknown | undefined;
 declare const api: unknown | undefined;
@@ -7,6 +38,16 @@ declare const SYS_Message: EasyedaMessageApi | undefined;
 
 // Injected at build time via environment variable or build script
 declare const BRIDGE_SESSION_TOKEN: string | undefined;
+// Compile-time hot-swap gate: true only in dev builds (scripts/build.mjs with
+// MCP_DEV_HOTSWAP=true). In marketplace builds the whole hot-swap path is dead
+// code, so a published .eext can never eval a pushed bundle.
+declare const __MCP_DEV_HOTSWAP__: boolean | undefined;
+
+// Single source for the extension version; sync-versions.mjs patches the
+// literal below (first `extensionVersion: '...'` match in this file).
+const EXTENSION_INFO = {
+  extensionVersion: '1.0.0-rc.6', // x-release-please-version
+};
 
 // Safe accessors for optional EasyEDA Pro runtime globals.
 // Never reference optional globals directly; they may not exist in the eval context.
@@ -29,9 +70,6 @@ function getInfoToastType(): string {
   return typeof info === 'string' ? info : 'info';
 }
 
-type JsonValue =
-  string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue | undefined };
-
 type ConnectMode = 'manual' | 'auto';
 type ConnectionState = 'disconnected' | 'connecting' | 'connected';
 type InboundMessageType = 'hello' | 'heartbeat' | 'request' | 'ignored';
@@ -43,6 +81,15 @@ interface EasyedaGlobal {
   connect?: (mode?: ConnectMode) => Promise<void>;
   disconnect?: () => void;
   showStatus?: () => void;
+  enableAutoConnect?: () => Promise<void>;
+  disableAutoConnect?: () => Promise<void>;
+  connectRemoteRelay?: (
+    mode?: Exclude<RemoteRelayMode, 'disabled'>,
+    relayUrl?: string,
+    pairingCode?: string,
+  ) => void;
+  disconnectRemoteRelay?: () => void;
+  showRemoteRelayStatus?: () => void;
 }
 
 interface EasyedaWebSocketApi {
@@ -59,6 +106,16 @@ interface EasyedaWebSocketApi {
 
 interface EasyedaMessageApi {
   showToastMessage?: (message: string, messageType?: string) => void;
+}
+
+interface EasyedaDialogApi {
+  showConfirmationMessage?: (
+    content: string,
+    title?: string,
+    mainButtonTitle?: string,
+    buttonTitle?: string,
+    callbackFn?: (mainButtonClicked: boolean) => void,
+  ) => void;
 }
 
 interface EasyedaToastApi {
@@ -102,74 +159,85 @@ interface SocketHandle {
   raw?: EasyedaSocket | WebSocket;
 }
 
+interface CreateSocketOptions {
+  skipRegister?: boolean;
+}
+
+type LocalConnectionPhase =
+  | 'register-open-timeout'
+  | 'socket-api-unavailable'
+  | 'socket-open-timeout'
+  | 'hello-timeout'
+  | 'socket-closed'
+  | 'socket-error';
+
+interface LocalConnectionDiagnostic {
+  phase: LocalConnectionPhase;
+  port: number;
+  transport?: SocketHandle['type'];
+  message: string;
+  priority: number;
+}
+
 const BRIDGE_PROTOCOL = 'easyeda-mcp-pro.bridge';
-const BRIDGE_VERSION = '1.1.0';
+const BRIDGE_VERSION = '1.0.0';
 const BRIDGE_CONTRACT_VERSION = 1;
-const BRIDGE_PORT = 49620;
-const PORT_SCAN_COUNT = 10;
-const CONNECT_TIMEOUT_MS = 8000;
-const EASYEDA_REGISTER_OPEN_FALLBACK_MS = 600;
-const RECONNECT_BASE_MS = 1000;
-const RECONNECT_MAX_MS = 30000;
-const STORAGE_KEY = 'easyeda-mcp-pro:autoConnect';
-// Beat every 10s to match the server; each side treats the other as dead after
-// ~3 missed beats, so symmetric intervals give both a 3x safety margin.
-const HEARTBEAT_MS = 10000;
-// Receive-side liveness: reconnect if the server sends nothing at all (not even a
-// heartbeat) for this long. ~35s tolerates ~3 missed server beats plus the timer
-// throttling browsers apply to background tabs before we treat the link as dead.
-const LIVENESS_TIMEOUT_MS = 35000;
-const WATCHDOG_CHECK_MS = 5000;
+const LOOPBACK_HOST = ['127', '0', '0', '1'].join('.');
 const SOCKET_ID = 'easyeda-mcp-pro-bridge';
-const PORT_SCAN_LABEL = `${BRIDGE_PORT}-${BRIDGE_PORT + PORT_SCAN_COUNT - 1}`;
-// Allow-list of EasyEDA Pro API class prefixes reachable via api.call.
-// SYS_ (sys_Log/sys_Message/sys_Storage/…) and PNL_ (panel) added so api.call
-// can reach the full documented API surface — e.g. SYS_Log.sort/find to read the
-// Log panel back for two-way "what happened" visibility. Anything outside these
-// prefixes is still reachable via api.execute (arbitrary JS) when enabled.
-const API_CLASS_PREFIXES = ['DMT_', 'SCH_', 'PCB_', 'LIB_', 'SYS_', 'PNL_'] as const;
-const DENIED_API_METHODS = new Set([
-  'constructor',
-  'prototype',
-  '__defineGetter__',
-  '__defineSetter__',
-]);
 
 let socketHandle: SocketHandle | null = null;
 let connectedPort: number | null = null;
+let preferredPort = BRIDGE_PORT;
 let connectionState: ConnectionState = 'disconnected';
 let activeConnectPromise: Promise<void> | null = null;
 let reconnectAttempts = 0;
 let connectRunId = 0;
 let manualDisconnectRequested = false;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-let watchdogTimer: ReturnType<typeof setInterval> | null = null;
-let lastInboundMs = 0;
-// Effective heartbeat cadence + liveness window. Default to the constants above,
-// but adapt to the server's advertised heartbeatIntervalMs on `hello` so a
-// non-default server cadence neither zombie-drops us nor false-flaps the link.
-let effectiveHeartbeatMs = HEARTBEAT_MS;
-let livenessTimeoutMs = LIVENESS_TIMEOUT_MS;
+let reconnectTimer: RuntimeTimerHandle | null = null;
+let heartbeatTimer: RuntimeTimerHandle | null = null;
+let lastServerActivityMs = 0;
+let lastLocalConnectionDiagnostic: LocalConnectionDiagnostic | null = null;
 let externalInteractionWarningShown = false;
+// Updated from the server's `hello` message; matches BRIDGE_MAX_PAYLOAD_SIZE default
+// until the handshake completes.
+let bridgeMaxPayloadSize = 1_048_576;
+// From the server's hello: whether it reassembles chunked frames (A5) and the
+// aggregate cap for one chunked payload. When unset, fall back to single-frame
+// sends limited by bridgeMaxPayloadSize, exactly as before.
+let serverSupportsChunking = false;
+let maxAggregatePayloadSize = 1_048_576;
+// From the server's hello: whether it accepts hot-swap pushes (dev mode only).
+let serverHotSwapEnabled = false;
 
 function getGlobal(): EasyedaGlobal | null {
   if (typeof eda !== 'undefined' && eda) return eda;
   return globalThis as unknown as EasyedaGlobal;
 }
 
-function log(message: string, data?: unknown): void {
-  const suffix = data === undefined ? '' : ` ${safeStringify(data)}`;
-  console.log(`[easyeda-mcp-pro ${new Date().toISOString()}] ${message}${suffix}`);
+const runtimeTimers = createRuntimeTimers(
+  () => readPath<EasyedaTimerApi>(getGlobal(), 'sys_Timer'),
+  globalThis as any,
+  SOCKET_ID,
+);
+
+function recordLocalConnectionDiagnostic(diagnostic: LocalConnectionDiagnostic): void {
+  log(`Local bridge connection phase ${diagnostic.phase}`, {
+    port: diagnostic.port,
+    transport: diagnostic.transport,
+    message: diagnostic.message,
+  });
+  const effectivePriority = diagnostic.priority + (diagnostic.port === preferredPort ? 1_000 : 0);
+  if (
+    !lastLocalConnectionDiagnostic ||
+    effectivePriority >= lastLocalConnectionDiagnostic.priority
+  ) {
+    lastLocalConnectionDiagnostic = { ...diagnostic, priority: effectivePriority };
+  }
 }
 
-function safeStringify(value: unknown): string {
-  try {
-    return JSON.stringify(value);
-  } catch (error) {
-    logRecoverableError('failed to stringify log payload', error);
-    return String(value);
-  }
+function localConnectionDiagnosticSuffix(): string {
+  if (!lastLocalConnectionDiagnostic) return '';
+  return ` — ${lastLocalConnectionDiagnostic.message}`;
 }
 
 function showToast(message: string): void {
@@ -199,45 +267,6 @@ function showToast(message: string): void {
   log(safeMessage);
 }
 
-interface EasyedaLogApi {
-  add?: (message: string, type?: unknown) => void;
-  clear?: () => void;
-}
-
-function getSysLog(): EasyedaLogApi | undefined {
-  return readPath<EasyedaLogApi>(getGlobal(), 'sys_Log');
-}
-
-// Persistent, user-visible debug log: writes to EasyEDA Pro's bottom "Log" panel
-// via SYS_Log.add(). Unlike toasts these entries stay put and can be read/copied
-// without opening DevTools — the channel for debugging the bridge live.
-// Best-effort: silently no-ops if the API is unavailable.
-function logPanel(message: string): void {
-  const sysLog = getSysLog();
-  if (sysLog?.add) {
-    try {
-      sysLog.add(`[mcp] ${message}`);
-    } catch (error) {
-      log('sys_Log.add failed', { message, error: String(error) });
-    }
-  }
-}
-
-// Console + Log panel — high-frequency internal tracing (every bridge call, etc.).
-function dbg(message: string): void {
-  log(message);
-  logPanel(message);
-}
-
-// Toast + Log panel — connection-lifecycle events the user should both see pop up
-// and have a persistent record of.
-function diagToast(message: string): void {
-  // Diagnostics go to the persistent Log panel ONLY — never as toasts — so the
-  // connect/reconnect lifecycle (handshake attempts, open events, etc.) can
-  // never spam pop-ups. Read them in EasyEDA's bottom "Log" panel.
-  logPanel(`[diag] ${message}`);
-}
-
 function showExternalInteractionHintOnce(error?: unknown): void {
   const message =
     'MCP Bridge needs EasyEDA External Interactions permission. Enable it in Extension Manager for MCP Pro Bridge.';
@@ -247,47 +276,139 @@ function showExternalInteractionHintOnce(error?: unknown): void {
   showToast(message);
 }
 
-function readPath<T>(source: unknown, path: string): T | undefined {
-  const parts = path.split('.');
-  let cursor: unknown = source;
-  for (const part of parts) {
-    if (!isRecord(cursor) || !(part in cursor)) return undefined;
-    try {
-      cursor = cursor[part];
-    } catch (error) {
-      logRecoverableError(`failed to read path segment ${part}`, error);
-      return undefined;
+// ── Dispatcher wiring ────────────────────────────────────────────────────────
+// The toolkit hands the dispatcher everything it needs from the loader. All
+// runtime globals go through it so the identical dispatcher code works baked
+// (extension script scope) and hot-swapped (AsyncFunction eval scope).
+
+const dispatcherToolkit: DispatcherToolkit = {
+  getEda: () => {
+    if (typeof eda !== 'undefined' && eda) return eda;
+    return (globalThis as { eda?: unknown }).eda;
+  },
+  getEDA: () => {
+    if (typeof EDA !== 'undefined' && EDA) return EDA;
+    return (globalThis as { EDA?: unknown }).EDA;
+  },
+  getApi: () => {
+    if (typeof api !== 'undefined' && api) return api;
+    return (globalThis as { api?: unknown }).api;
+  },
+  getGlobal: () => getGlobal(),
+  log,
+  showToast,
+  // With chunked sends (A5) a single logical payload may span many frames, so
+  // the dispatcher's binary self-limit is the aggregate cap, not the frame cap.
+  getBridgeMaxPayloadSize: () =>
+    serverSupportsChunking ? maxAggregatePayloadSize : bridgeMaxPayloadSize,
+  normalizeCanvasBinaryResult: (value, fallbackFileName) =>
+    normalizeCanvasBinaryResult(value, fallbackFileName, bridgeMaxPayloadSize),
+  getBridgeVersion: () => BRIDGE_VERSION,
+};
+
+const bakedDispatcher: Dispatcher = createDispatcher(dispatcherToolkit);
+let activeDispatcher: Dispatcher = bakedDispatcher;
+
+function dispatchViaActive(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+  return activeDispatcher.dispatch(method, params);
+}
+
+// ── Local full-access extensions (fork-only) ─────────────────────────────────
+// The upstream modular dispatcher does not implement the editor/tab
+// orchestration methods (headless multi-tab navigation + document targeting) or
+// the native PCB-authoring methods this fork exposes through src/tools/L1_editor.ts
+// and src/tools/L1_pcb_write.ts. They are handled here in the loader — alongside
+// handleLoaderMethod and BEFORE the dispatcher — so they survive a dispatcher
+// hot swap. Every entry below must also be present in EasyedaApiMethodSchema on
+// the server, otherwise the methodListHash comparison reports a registry mismatch.
+
+const LOCAL_EXTENSION_METHODS = [
+  'editor.activateDocument',
+  'editor.closeDocument',
+  'editor.listTabs',
+  'editor.openDocument',
+  'editor.screenshot',
+  'editor.tileAll',
+  'editor.zoomToAll',
+  'pcb.addBoardOutline',
+  'pcb.addHole',
+  'pcb.addPad',
+  'pcb.addSilkLine',
+  'pcb.addSilkText',
+  'pcb.addSolidRegion',
+  'pcb.importProjectFile',
+  'pcb.importSesRoute',
+  'pcb.save',
+  'project.getInfo',
+] as const;
+
+const LOCAL_EXTENSION_METHOD_SET: ReadonlySet<string> = new Set(LOCAL_EXTENSION_METHODS);
+
+function newBridgeError(
+  code: string,
+  message: string,
+  suggestion: string,
+  data?: unknown,
+): Error {
+  const error = new Error(message) as Error & {
+    code?: string;
+    suggestion?: string;
+    data?: unknown;
+  };
+  error.code = code;
+  error.suggestion = suggestion;
+  if (data !== undefined) error.data = data;
+  return error;
+}
+
+function localApiRoots(): unknown[] {
+  const roots: unknown[] = [];
+  const edaRoot = dispatcherToolkit.getEda();
+  const edaUpper = dispatcherToolkit.getEDA();
+  const apiRoot = dispatcherToolkit.getApi();
+  if (edaRoot) roots.push(edaRoot);
+  if (edaUpper) roots.push(edaUpper);
+  if (apiRoot) roots.push(apiRoot);
+  roots.push(globalThis);
+  return roots;
+}
+
+// EasyEDA Pro exposes the same class under both `pcb_Foo` and `PCB_Foo`
+// depending on build; try both casings for every candidate path.
+function withClassNameVariants(paths: readonly string[]): string[] {
+  const variants: string[] = [];
+  for (const path of paths) {
+    variants.push(path);
+    const parts = path.split('.');
+    const className = parts[0];
+    if (!className) continue;
+    const rest = parts.slice(1).join('.');
+    const suffix = rest ? `.${rest}` : '';
+    const lowerPrefixMatch = className.match(/^([a-z]+)_(.+)$/);
+    const upperPrefixMatch = className.match(/^([A-Z]+)_(.+)$/);
+    if (lowerPrefixMatch?.[1] && lowerPrefixMatch[2]) {
+      variants.push(`${lowerPrefixMatch[1].toUpperCase()}_${lowerPrefixMatch[2]}${suffix}`);
+    }
+    if (upperPrefixMatch?.[1] && upperPrefixMatch[2]) {
+      variants.push(`${upperPrefixMatch[1].toLowerCase()}_${upperPrefixMatch[2]}${suffix}`);
     }
   }
-  return cursor as T;
+  return [...new Set(variants)];
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
-}
-
-function logRecoverableError(context: string, error: unknown): void {
-  console.warn(`[easyeda-mcp-pro] ${context}`, error);
-}
-
-async function callFirst(paths: string[], ...args: unknown[]): Promise<unknown> {
-  const candidates: unknown[] = [];
-  if (typeof eda !== 'undefined' && eda) candidates.push(eda);
-  if (typeof EDA !== 'undefined' && EDA) candidates.push(EDA);
-  if (typeof api !== 'undefined' && api) candidates.push(api);
-  candidates.push(globalThis);
-
+async function localCallFirst(paths: readonly string[], ...args: unknown[]): Promise<unknown> {
   const allPaths = withClassNameVariants(paths);
-
-  for (const candidate of candidates) {
+  for (const root of localApiRoots()) {
     for (const path of allPaths) {
-      const fn = readPath<unknown>(candidate, path);
+      const fn = readPath<unknown>(root, path);
       if (typeof fn === 'function') {
-        return await fn.apply(readPathParent(candidate, path), args);
+        return await (fn as (...callArgs: unknown[]) => unknown).apply(
+          readPathParent(root, path),
+          args,
+        );
       }
     }
   }
-
   throw newBridgeError(
     'METHOD_NOT_FOUND',
     `No EasyEDA API implementation found for ${paths.join(' or ')}`,
@@ -295,967 +416,7 @@ async function callFirst(paths: string[], ...args: unknown[]): Promise<unknown> 
   );
 }
 
-// ---------------------------------------------------------------------------
-// PCB authoring helpers (build 0.6.0)
-//
-// All signatures below are confirmed against @jlceda/pro-api-types (the official
-// EasyEDA Pro extension API typings). The runtime accessor is eda.pcb_<Class>;
-// callFirst() + withClassNameVariants() try both PCB_ and pcb_ casings, so the
-// canonical 'PCB_<Class>.<method>' candidate resolves at runtime.
-// ---------------------------------------------------------------------------
-
-// EPCB_LayerId values used as the `layer` argument on create(...).
-const PCB_LAYER = {
-  TOP: 1,
-  BOTTOM: 2,
-  TOP_SILK: 3,
-  BOTTOM_SILK: 4,
-  BOARD_OUTLINE: 11,
-  MULTI: 12,
-  DOCUMENT: 13,
-  MECHANICAL: 14,
-} as const;
-
-// Accept either nested [[x,y],...] or flat [x,y,x,y,...] and return [x,y] pairs.
-function toXYPairs(points: unknown): Array<[number, number]> {
-  if (!Array.isArray(points)) return [];
-  if (points.length > 0 && Array.isArray(points[0])) {
-    return (points as unknown[][]).map((p) => [Number(p[0]), Number(p[1])] as [number, number]);
-  }
-  const flat = (points as unknown[]).map(Number);
-  const pairs: Array<[number, number]> = [];
-  for (let i = 0; i + 1 < flat.length; i += 2) pairs.push([flat[i], flat[i + 1]]);
-  return pairs;
-}
-
-// Normalize a create(...) result (an IPCB_Primitive* instance or id string) to
-// a { primitiveId } shape for the MCP layer.
-function pcbId(result: unknown, prefix: string): { primitiveId: string } {
-  let id = '';
-  if (typeof result === 'string') {
-    id = result;
-  } else if (result && typeof result === 'object') {
-    const r = result as Record<string, unknown>;
-    const getter = r.getState_PrimitiveId;
-    const fromGetter = typeof getter === 'function' ? (getter as () => unknown).call(r) : undefined;
-    id = String(r.primitiveId ?? r.uuid ?? r.id ?? fromGetter ?? '');
-  }
-  return { primitiveId: id || `${prefix}_${Date.now()}` };
-}
-
-// Build an EasyEDA TPCB_PolygonSourceArray from a shape descriptor. Grammar (per
-// the official typings): polygon = [x1,y1,'L',x2,y2,...]; rect = ['R',x,y,w,h,rot,round];
-// circle = ['CIRCLE',cx,cy,r]. A single polygon auto-closes. Throws on a
-// degenerate (<3-point) polygon or any non-finite coordinate.
-function polygonSource(shape: string, p: Record<string, unknown>): Array<string | number> {
-  let src: Array<string | number>;
-  if (shape === 'circle') {
-    src = ['CIRCLE', Number(p.cx), Number(p.cy), Number(p.radius)];
-  } else if (shape === 'rect') {
-    src = [
-      'R',
-      Number(p.x),
-      Number(p.y),
-      Number(p.width),
-      Number(p.height),
-      Number(p.rotation ?? 0),
-      Number(p.round ?? 0),
-    ];
-  } else {
-    const pairs = toXYPairs(p.points);
-    if (pairs.length < 3) {
-      throw newBridgeError(
-        'INVALID_POLYGON',
-        `polygon region needs at least 3 points (got ${pairs.length}).`,
-        'Pass a points array describing a closed area.',
-      );
-    }
-    src = [];
-    pairs.forEach(([x, y], i) => {
-      if (i === 0) src.push(x, y, 'L');
-      else src.push(x, y);
-    });
-  }
-  for (const v of src) {
-    if (typeof v === 'number' && !Number.isFinite(v)) {
-      throw newBridgeError(
-        'INVALID_GEOMETRY',
-        `${shape} region has a non-finite coordinate (${String(v)}).`,
-        'Provide every coordinate/size field required for this shape.',
-      );
-    }
-  }
-  return src;
-}
-
-// Build an IPCB_Polygon (the complexPolygon/polygon arg for Fill/Pour/Region/
-// Polyline) via eda.pcb_MathPolygon.createPolygon. Throws INVALID_POLYGON if the
-// runtime cannot build a polygon, rather than passing a raw source array that
-// PCB_PrimitivePour/Fill.create (which require an IPCB_Polygon) would reject.
-async function buildPolygon(shape: string, p: Record<string, unknown>): Promise<unknown> {
-  const source = polygonSource(shape, p);
-  const poly = await callFirst(
-    ['PCB_MathPolygon.createPolygon', 'pcb_MathPolygon.createPolygon'],
-    source,
-  );
-  if (!poly) {
-    throw newBridgeError(
-      'INVALID_POLYGON',
-      `pcb_MathPolygon.createPolygon could not build a ${shape} polygon.`,
-      'Check that the shape parameters (points/rect/circle) describe a valid enclosed area.',
-    );
-  }
-  return poly;
-}
-
-function readPathParent(source: unknown, path: string): unknown {
-  const parentPath = path.split('.').slice(0, -1).join('.');
-  return parentPath ? readPath(source, parentPath) : source;
-}
-
-function readFirstPath<T>(paths: string[]): T | undefined {
-  for (const candidate of getApiCandidates()) {
-    for (const path of withClassNameVariants(paths)) {
-      const value = readPath<T>(candidate.root, path);
-      if (value !== undefined) return value;
-    }
-  }
-  return undefined;
-}
-
-function getApiCandidates(): Array<{ name: string; root: unknown }> {
-  const candidates: Array<{ name: string; root: unknown }> = [];
-  if (typeof eda !== 'undefined' && eda) candidates.push({ name: 'eda', root: eda });
-  if (typeof EDA !== 'undefined' && EDA) candidates.push({ name: 'EDA', root: EDA });
-  if (typeof api !== 'undefined' && api) candidates.push({ name: 'api', root: api });
-  candidates.push({ name: 'globalThis', root: globalThis });
-  return candidates;
-}
-
-function withClassNameVariants(paths: string[]): string[] {
-  const variants: string[] = [];
-  for (const path of paths) {
-    variants.push(path);
-    const parts = path.split('.');
-    const className = parts[0];
-    if (!className) continue;
-
-    const rest = parts.slice(1).join('.');
-    const suffix = rest ? `.${rest}` : '';
-    const lowerPrefixMatch = className.match(/^([a-z]+)_(.+)$/);
-    const upperPrefixMatch = className.match(/^([A-Z]+)_(.+)$/);
-
-    if (lowerPrefixMatch?.[1] && lowerPrefixMatch[2]) {
-      variants.push(`${lowerPrefixMatch[1].toUpperCase()}_${lowerPrefixMatch[2]}${suffix}`);
-    }
-
-    if (upperPrefixMatch?.[1] && upperPrefixMatch[2]) {
-      variants.push(`${upperPrefixMatch[1].toLowerCase()}_${upperPrefixMatch[2]}${suffix}`);
-    }
-  }
-
-  return [...new Set(variants)];
-}
-
-function normalizeApiClassName(className: string): string {
-  const match = className.match(/^([a-z]+)_(.+)$/);
-  if (!match?.[1] || !match[2]) return className;
-  return `${match[1].toUpperCase()}_${match[2]}`;
-}
-
-function isAllowedApiPath(path: string): boolean {
-  const parts = path.split('.');
-  if (parts.length !== 2 || !parts[0] || !parts[1]) return false;
-  const [className, methodName] = parts;
-  if (DENIED_API_METHODS.has(methodName) || methodName.startsWith('__')) return false;
-  if (!/^[A-Za-z]+_[A-Za-z0-9]+$/.test(className)) return false;
-  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(methodName)) return false;
-  return API_CLASS_PREFIXES.some((prefix) => normalizeApiClassName(className).startsWith(prefix));
-}
-
-function getAllPropertyNames(value: unknown): string[] {
-  const names: string[] = [];
-  let cursor = value;
-  let depth = 0;
-  while (isRecord(cursor) && cursor !== Object.prototype && depth < 8) {
-    try {
-      names.push(...Object.getOwnPropertyNames(cursor));
-    } catch (error) {
-      logRecoverableError('failed to read API property names', error);
-      break;
-    }
-    try {
-      cursor = Object.getPrototypeOf(cursor);
-    } catch (error) {
-      logRecoverableError('failed to read API property prototype', error);
-      break;
-    }
-    depth += 1;
-  }
-  return Array.from(new Set(names)).filter(
-    (name) => !['length', 'name', 'prototype', 'constructor'].includes(name),
-  );
-}
-
-function getFunctionNames(value: unknown): string[] {
-  return getAllPropertyNames(value).filter((name) => {
-    const member = readMember(value, name);
-    return typeof member === 'function';
-  });
-}
-
-function readMember(source: unknown, key: string): unknown {
-  if (!isRecord(source) || !(key in source)) return undefined;
-  try {
-    return source[key];
-  } catch (error) {
-    logRecoverableError(`failed to read API member ${key}`, error);
-    return undefined;
-  }
-}
-
-function normalizeValue(value: unknown, depth = 3, seen = new WeakSet<object>()): JsonValue {
-  if (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'number' ||
-    typeof value === 'boolean'
-  ) {
-    return value;
-  }
-  if (value === undefined) return null;
-  if (typeof value === 'function')
-    return `[Function ${(value as { name?: string }).name ?? 'anonymous'}]`;
-  if (typeof value !== 'object') return String(value);
-  if (seen.has(value)) return '[Circular]';
-  if (depth <= 0) return '[MaxDepth]';
-
-  seen.add(value);
-
-  if (Array.isArray(value)) {
-    return value.slice(0, 100).map((item) => normalizeValue(item, depth - 1, seen));
-  }
-
-  const output: Record<string, JsonValue | undefined> = {};
-  const ctorName = (value as { constructor?: { name?: string } }).constructor?.name;
-  if (ctorName && ctorName !== 'Object') output.__class = ctorName;
-
-  const getterNames = getFunctionNames(value)
-    .filter((name) => name.startsWith('getState_'))
-    .slice(0, 80);
-  if (getterNames.length > 0) {
-    const state: Record<string, JsonValue | undefined> = {};
-    for (const getterName of getterNames) {
-      const getter = readMember(value, getterName);
-      if (typeof getter !== 'function') continue;
-      try {
-        state[getterName.replace(/^getState_/, '')] = normalizeValue(
-          getter.call(value),
-          depth - 1,
-          seen,
-        );
-      } catch (error) {
-        state[getterName.replace(/^getState_/, '')] = `ERROR: ${String(error)}`;
-      }
-    }
-    output.state = state;
-  }
-
-  const methodNames = getFunctionNames(value).slice(0, 120);
-  if (methodNames.length > 0) output.__methods = methodNames;
-
-  for (const key of Object.keys(value).slice(0, 80)) {
-    output[key] = normalizeValue((value as Record<string, unknown>)[key], depth - 1, seen);
-  }
-
-  return output;
-}
-
-function inspectApiInventory(filter?: string): JsonValue {
-  const normalizedFilter = filter?.toLowerCase().trim();
-  const classMap = new Map<
-    string,
-    {
-      className: string;
-      runtimePaths: string[];
-      methods: string[];
-    }
-  >();
-
-  for (const candidate of getApiCandidates()) {
-    const root = candidate.root;
-    if (!isRecord(root)) continue;
-
-    for (const key of Object.getOwnPropertyNames(root)) {
-      const className = normalizeApiClassName(key);
-      if (!API_CLASS_PREFIXES.some((prefix) => className.startsWith(prefix))) continue;
-      if (normalizedFilter && !className.toLowerCase().includes(normalizedFilter)) continue;
-
-      const value = readMember(root, key);
-      const methods = getFunctionNames(value).sort();
-      const existing = classMap.get(className) ?? {
-        className,
-        runtimePaths: [],
-        methods: [],
-      };
-      existing.runtimePaths.push(`${candidate.name}.${key}`);
-      existing.methods = Array.from(new Set([...existing.methods, ...methods])).sort();
-      classMap.set(className, existing);
-    }
-  }
-
-  const classes = Array.from(classMap.values()).sort((a, b) =>
-    a.className.localeCompare(b.className),
-  );
-  return {
-    classes: classes as unknown as JsonValue,
-    total: classes.length,
-  };
-}
-
-async function callAllowedApi(path: string, args: unknown[]): Promise<unknown> {
-  if (!isAllowedApiPath(path)) {
-    throw newBridgeError(
-      'UNAUTHORIZED',
-      `API path is not allowed: ${path}`,
-      'Use a documented EasyEDA API class method such as SCH_PrimitiveWire.getAll.',
-    );
-  }
-
-  for (const candidate of getApiCandidates()) {
-    for (const candidatePath of withClassNameVariants([path])) {
-      const fn = readPath<unknown>(candidate.root, candidatePath);
-      if (typeof fn !== 'function') continue;
-      const parent = readPathParent(candidate.root, candidatePath);
-      const result = await fn.apply(parent, args);
-      return {
-        path,
-        resolvedPath: `${candidate.name}.${candidatePath}`,
-        result: normalizeValue(result, 5),
-      };
-    }
-  }
-
-  throw newBridgeError(
-    'METHOD_NOT_FOUND',
-    `No EasyEDA API implementation found for ${path}`,
-    'Check easyeda_api_inventory for runtime-supported classes and methods.',
-  );
-}
-
-function newBridgeError(code: string, message: string, suggestion: string, data?: unknown): Error {
-  const error = new Error(message);
-  Object.assign(error, { code, suggestion, data });
-  return error;
-}
-
-async function listComponentsApi(): Promise<unknown> {
-  const schCompClass = readFirstPath<any>([
-    'SCH_PrimitiveComponent',
-    'SCH_PrimitiveComponent3',
-    'sch_PrimitiveComponent',
-  ]);
-
-  if (!schCompClass) {
-    throw new Error('SCH_PrimitiveComponent class not found in EasyEDA Pro API');
-  }
-
-  const comps = await schCompClass.getAll(undefined, true);
-  const result: any[] = [];
-
-  for (const c of comps || []) {
-    const ref = typeof c.getState_Designator === 'function' ? c.getState_Designator() : '';
-    const val = typeof c.getState_Name === 'function' ? c.getState_Name() : '';
-    // Footprint name is taken from OtherProperty below only. The library lookup
-    // (LIB_Footprint.get) is a cloud round-trip in Full-Online mode and, run
-    // serially per component, hangs the whole read on large sheets — never block
-    // on it. (This is the v3.2.149 listComponents-timeout root cause.)
-    let fp = '';
-
-    const lcsc = typeof c.getState_SupplierId === 'function' ? c.getState_SupplierId() : '';
-    const mfr = typeof c.getState_Manufacturer === 'function' ? c.getState_Manufacturer() : '';
-    let ds = '';
-
-    if (typeof c.getState_OtherProperty === 'function') {
-      const other = c.getState_OtherProperty();
-      if (other) {
-        if (!fp && (other.Footprint || other.footprint))
-          fp = String(other.Footprint || other.footprint);
-        ds = String(other.Datasheet || other.datasheet || '');
-      }
-    }
-
-    result.push({
-      reference: ref,
-      value: val,
-      footprint: fp,
-      lcsc: lcsc,
-      manufacturer: mfr,
-      datasheet: ds,
-    });
-  }
-  return result;
-}
-
-async function listNetsApi(): Promise<unknown> {
-  const schCompClass = readFirstPath<any>([
-    'SCH_PrimitiveComponent',
-    'SCH_PrimitiveComponent3',
-    'sch_PrimitiveComponent',
-  ]);
-  const schNetClass = readFirstPath<any>(['SCH_Net', 'sch_Net']);
-
-  if (!schCompClass) {
-    throw new Error('SCH_PrimitiveComponent class not found in EasyEDA Pro API');
-  }
-
-  const comps = await schCompClass.getAll(undefined, true);
-  const netMap = new Map<string, Array<{ component: string; pin: string }>>();
-
-  for (const c of comps || []) {
-    const ref = typeof c.getState_Designator === 'function' ? c.getState_Designator() : '';
-    if (!ref || typeof c.getAllPins !== 'function') continue;
-
-    try {
-      const pins = await c.getAllPins();
-      for (const p of pins || []) {
-        if (typeof p.getState_PinNumber !== 'function') continue;
-        const pinNum = p.getState_PinNumber();
-
-        let netName = '';
-        if (typeof p.getState_OtherProperty === 'function') {
-          const other = p.getState_OtherProperty();
-          if (other) {
-            netName = String(other.net || other.Net || '');
-          }
-        }
-
-        if (netName) {
-          if (!netMap.has(netName)) {
-            netMap.set(netName, []);
-          }
-          netMap.get(netName)!.push({ component: ref, pin: pinNum });
-        }
-      }
-    } catch (e) {
-      logRecoverableError('failed to inspect schematic component pins', e);
-    }
-  }
-
-  if (schNetClass && typeof schNetClass.getAllNets === 'function') {
-    try {
-      const allNets = await schNetClass.getAllNets();
-      for (const n of allNets || []) {
-        const netName = n.netName || n.net;
-        if (netName && !netMap.has(netName)) {
-          netMap.set(netName, []);
-        }
-      }
-    } catch (e) {
-      logRecoverableError('failed to inspect schematic nets', e);
-    }
-  }
-
-  const result: any[] = [];
-  for (const [netName, nodes] of netMap.entries()) {
-    result.push({
-      netName,
-      nodes,
-    });
-  }
-  return result;
-}
-
-async function inspectComponentsApi(limit = 5): Promise<unknown> {
-  const schCompClass = readFirstPath<any>([
-    'SCH_PrimitiveComponent',
-    'SCH_PrimitiveComponent3',
-    'sch_PrimitiveComponent',
-  ]);
-  if (!schCompClass || typeof schCompClass.getAll !== 'function') {
-    throw new Error('SCH_PrimitiveComponent.getAll is not available in this EasyEDA runtime');
-  }
-
-  const comps = await schCompClass.getAll(undefined, true);
-  const items = Array.isArray(comps) ? comps : [];
-  return {
-    total: items.length,
-    samples: items
-      .slice(0, Math.max(1, Math.min(limit, 25)))
-      .map((item) => normalizeValue(item, 5)),
-  };
-}
-
-// Ported from upstream 0.18.0 to back the server-side easyeda_wire_probe tool.
-// Mirrors inspectComponentsApi(); uses this build's normalizeValue() summarizer
-// so no extra helper is needed.
-async function inspectWiresApi(limit = 10): Promise<unknown> {
-  const schWireClass = readFirstPath<any>([
-    'SCH_PrimitiveWire',
-    'SCH_PrimitiveWire3',
-    'sch_PrimitiveWire',
-  ]);
-  if (!schWireClass || typeof schWireClass.getAll !== 'function') {
-    throw new Error('SCH_PrimitiveWire.getAll is not available in this EasyEDA runtime');
-  }
-  const wires = await schWireClass.getAll();
-  const items = Array.isArray(wires) ? wires : [];
-  return {
-    total: items.length,
-    samples: items
-      .slice(0, Math.max(1, Math.min(limit, 50)))
-      .map((item) => normalizeValue(item, 5)),
-  };
-}
-
-async function listLayersApi(): Promise<unknown> {
-  const globalObj = getGlobal();
-  const pcbLayerClass = readPath<any>(globalObj, 'pcb_Layer');
-  if (!pcbLayerClass || typeof pcbLayerClass.getAllLayers !== 'function') {
-    throw new Error('pcb_Layer class or getAllLayers method not found');
-  }
-  const layers = await pcbLayerClass.getAllLayers();
-  return (layers || []).map((l: any) => ({
-    name: l.name || '',
-    type: l.type || '',
-    color: l.color || '',
-    visible: l.visible !== false,
-    order: l.order || 0,
-  }));
-}
-
-async function getStackupApi(): Promise<unknown> {
-  const globalObj = getGlobal();
-  const pcbLayerClass = readPath<any>(globalObj, 'pcb_Layer');
-  if (!pcbLayerClass) {
-    throw new Error('pcb_Layer class not found');
-  }
-
-  let totalCopper = 2;
-  if (typeof pcbLayerClass.getTheNumberOfCopperLayers === 'function') {
-    try {
-      totalCopper = await pcbLayerClass.getTheNumberOfCopperLayers();
-    } catch (e) {
-      logRecoverableError('failed to read copper layer count', e);
-    }
-  }
-
-  let physicalStacking: any = null;
-  if (typeof pcbLayerClass.getCurrentPhysicalStackingConfiguration === 'function') {
-    try {
-      physicalStacking = await pcbLayerClass.getCurrentPhysicalStackingConfiguration();
-    } catch (e) {
-      logRecoverableError('failed to read physical stackup', e);
-    }
-  }
-
-  const layers: any[] = [];
-  if (physicalStacking && Array.isArray(physicalStacking.layers)) {
-    for (const l of physicalStacking.layers) {
-      layers.push({
-        name: l.name || '',
-        type: l.type || '',
-        thicknessMm: l.thickness || 0,
-        material: l.material || '',
-        dielectricConstant: l.dielectric || 0,
-        copperWeightOz: l.copperWeight || 0,
-      });
-    }
-  }
-
-  return {
-    totalLayers: totalCopper,
-    boardThicknessMm: physicalStacking?.thickness || 1.6,
-    layers,
-  };
-}
-
-async function getDimensionsApi(): Promise<unknown> {
-  const globalObj = getGlobal();
-  const pcbLineClass = readPath<any>(globalObj, 'pcb_PrimitiveLine');
-  const pcbArcClass = readPath<any>(globalObj, 'pcb_PrimitiveArc');
-  const pcbPadClass = readPath<any>(globalObj, 'pcb_PrimitivePad');
-
-  let minX = Infinity,
-    maxX = -Infinity;
-  let minY = Infinity,
-    maxY = -Infinity;
-
-  const updateBBox = (x: number, y: number) => {
-    if (x < minX) minX = x;
-    if (x > maxX) maxX = x;
-    if (y < minY) minY = y;
-    if (y > maxY) maxY = y;
-  };
-
-  if (pcbLineClass && typeof pcbLineClass.getAll === 'function') {
-    try {
-      const lines = await pcbLineClass.getAll();
-      for (const l of lines || []) {
-        if (typeof l.getState_Layer === 'function' && l.getState_Layer() === 11) {
-          const points = typeof l.getState_Points === 'function' ? l.getState_Points() : [];
-          for (const p of points || []) {
-            updateBBox(p.x, p.y);
-          }
-        }
-      }
-    } catch (e) {
-      logRecoverableError('failed to read board outline lines', e);
-    }
-  }
-
-  if (pcbArcClass && typeof pcbArcClass.getAll === 'function') {
-    try {
-      const arcs = await pcbArcClass.getAll();
-      for (const a of arcs || []) {
-        if (typeof a.getState_Layer === 'function' && a.getState_Layer() === 11) {
-          const sx = typeof a.getState_StartX === 'function' ? a.getState_StartX() : 0;
-          const sy = typeof a.getState_StartY === 'function' ? a.getState_StartY() : 0;
-          const ex = typeof a.getState_EndX === 'function' ? a.getState_EndX() : 0;
-          const ey = typeof a.getState_EndY === 'function' ? a.getState_EndY() : 0;
-          updateBBox(sx, sy);
-          updateBBox(ex, ey);
-        }
-      }
-    } catch (e) {
-      logRecoverableError('failed to read board outline arcs', e);
-    }
-  }
-
-  const width = maxX > minX ? maxX - minX : 0;
-  const height = maxY > minY ? maxY - minY : 0;
-
-  let mountingHoles = 0;
-  if (pcbPadClass && typeof pcbPadClass.getAll === 'function') {
-    try {
-      const pads = await pcbPadClass.getAll();
-      for (const p of pads || []) {
-        const hType = typeof p.getState_HoleType === 'function' ? p.getState_HoleType() : '';
-        const hSize = typeof p.getState_HoleSize === 'function' ? p.getState_HoleSize() : 0;
-        if (hType === 'MountingHole' || hSize > 2) {
-          mountingHoles++;
-        }
-      }
-    } catch (e) {
-      logRecoverableError('failed to read mounting-hole pads', e);
-    }
-  }
-
-  return {
-    widthMm: width,
-    heightMm: height,
-    shape: 'custom',
-    mountingHoleCount: mountingHoles,
-    areaMm2: width * height,
-  };
-}
-
-async function getFeaturesApi(): Promise<unknown> {
-  const globalObj = getGlobal();
-  const pcbViaClass = readPath<any>(globalObj, 'pcb_PrimitiveVia');
-  const pcbTrackClass = readPath<any>(globalObj, 'pcb_PrimitiveTrack');
-  const pcbPadClass = readPath<any>(globalObj, 'pcb_PrimitivePad');
-  const pcbPourClass = readPath<any>(globalObj, 'pcb_PrimitivePour');
-  const pcbCompClass = readPath<any>(globalObj, 'pcb_PrimitiveComponent');
-
-  let viasCount = 0;
-  let tracksCount = 0;
-  let padsCount = 0;
-  let zonesCount = 0;
-  let compsCount = 0;
-
-  try {
-    if (pcbViaClass && typeof pcbViaClass.getAll === 'function') {
-      viasCount = (await pcbViaClass.getAll())?.length || 0;
-    }
-  } catch (e) {
-    logRecoverableError('failed to count vias', e);
-  }
-
-  try {
-    if (pcbTrackClass && typeof pcbTrackClass.getAll === 'function') {
-      tracksCount = (await pcbTrackClass.getAll())?.length || 0;
-    }
-  } catch (e) {
-    logRecoverableError('failed to count tracks', e);
-  }
-
-  try {
-    if (pcbPadClass && typeof pcbPadClass.getAll === 'function') {
-      padsCount = (await pcbPadClass.getAll())?.length || 0;
-    }
-  } catch (e) {
-    logRecoverableError('failed to count pads', e);
-  }
-
-  try {
-    if (pcbPourClass && typeof pcbPourClass.getAll === 'function') {
-      zonesCount = (await pcbPourClass.getAll())?.length || 0;
-    }
-  } catch (e) {
-    logRecoverableError('failed to count zones', e);
-  }
-
-  try {
-    if (pcbCompClass && typeof pcbCompClass.getAll === 'function') {
-      compsCount = (await pcbCompClass.getAll())?.length || 0;
-    }
-  } catch (e) {
-    logRecoverableError('failed to count PCB components', e);
-  }
-
-  return {
-    vias: viasCount,
-    tracks: tracksCount,
-    zones: zonesCount,
-    pads: padsCount,
-    components: compsCount,
-  };
-}
-
-async function generateBomApi(params: any): Promise<unknown> {
-  const comps = (await listComponentsApi()) as any[];
-  const groupBy = params.groupBy || 'value';
-  const groups = new Map<string, any>();
-
-  for (const c of comps) {
-    let key = '';
-    if (groupBy === 'lcsc') {
-      key = c.lcsc || c.value;
-    } else if (groupBy === 'footprint') {
-      key = c.footprint || 'no-footprint';
-    } else {
-      key = c.value || 'no-value';
-    }
-
-    if (!groups.has(key)) {
-      groups.set(key, {
-        references: [],
-        value: c.value,
-        footprint: c.footprint,
-        lcsc: c.lcsc,
-        manufacturer: c.manufacturer,
-        quantity: 0,
-      });
-    }
-    const group = groups.get(key);
-    group.references.push(c.reference);
-    group.quantity += 1;
-  }
-
-  const entries = [];
-  for (const group of groups.values()) {
-    entries.push({
-      reference: group.references.join(', '),
-      value: group.value,
-      footprint: group.footprint,
-      lcsc: group.lcsc,
-      quantity: group.quantity,
-      manufacturer: group.manufacturer,
-    });
-  }
-  return entries;
-}
-
-/**
- * Try to connect a specific component pin to a net by finding the component,
- * locating the pin, and setting its net property. Falls back gracefully when
- * the runtime API does not expose pin-level modification.
- */
-async function connectPinToNetImpl(
-  primitiveId: string,
-  pinNumber: string,
-  netName: string,
-): Promise<void> {
-  const schCompClass = readFirstPath<any>([
-    'SCH_PrimitiveComponent',
-    'SCH_PrimitiveComponent3',
-    'sch_PrimitiveComponent',
-  ]);
-
-  if (!schCompClass || typeof schCompClass.getAll !== 'function') {
-    // Fallback: try SCH_Netlist API
-    try {
-      await callFirst(
-        ['SCH_Netlist.create', 'sch_Netlist.create', 'SCH_Netlist.connectPin'],
-        primitiveId,
-        pinNumber,
-        netName,
-      );
-      return;
-    } catch {
-      // Both paths failed — surface the primary error
-      throw newBridgeError(
-        'EASYEDA_API_ERROR',
-        'No API available to connect pin to net. Ensure SCH_PrimitiveComponent and SCH_Netlist are available.',
-        'Verify the bridge extension supports the installed EasyEDA Pro version.',
-      );
-    }
-  }
-
-  const comps = await schCompClass.getAll(undefined, true);
-
-  // Try to find the component by:
-  // 1. Primitive ID (e.g. "e98") — via getState().PrimitiveId
-  // 2. Designator (e.g. "R1") — via getState_Designator()
-  const target = (comps || []).find((c: any) => {
-    try {
-      // Check primitiveId via getState
-      if (typeof c.getState === 'function') {
-        const st = c.getState();
-        if (st && st.PrimitiveId === primitiveId) return true;
-      }
-    } catch {}
-    try {
-      // Check getState_PrimitiveId directly
-      if (
-        typeof c.getState_PrimitiveId === 'function' &&
-        String(c.getState_PrimitiveId()) === primitiveId
-      )
-        return true;
-    } catch {}
-    try {
-      // Check by designator (legacy)
-      if (typeof c.getState_Designator === 'function' && c.getState_Designator() === primitiveId)
-        return true;
-    } catch {}
-    return false;
-  });
-  if (!target) {
-    throw newBridgeError(
-      'EASYEDA_API_ERROR',
-      `Component with primitiveId "${primitiveId}" not found`,
-      'Verify the primitiveId is correct.',
-    );
-  }
-
-  if (typeof target.getAllPins !== 'function') {
-    throw newBridgeError(
-      'EASYEDA_API_ERROR',
-      `Component "${primitiveId}" does not expose getAllPins`,
-      'Component may not support pin enumeration.',
-    );
-  }
-
-  const pins = await target.getAllPins();
-  const targetPin = (pins || []).find(
-    (p: any) =>
-      typeof p.getState_PinNumber === 'function' &&
-      String(p.getState_PinNumber()) === String(pinNumber),
-  );
-  if (!targetPin) {
-    throw newBridgeError(
-      'EASYEDA_API_ERROR',
-      `Pin "${pinNumber}" not found on component "${primitiveId}"`,
-      'Verify the pin number is correct.',
-    );
-  }
-
-  // Modify the pin's OtherProperty to set the net name
-  // This is the same property read by listNetsApi()
-  const existing =
-    typeof targetPin.getState_OtherProperty === 'function'
-      ? targetPin.getState_OtherProperty()
-      : {};
-  const updated = { ...(existing || {}), net: netName };
-
-  if (typeof targetPin.setState_OtherProperty === 'function') {
-    targetPin.setState_OtherProperty(updated);
-  } else {
-    // Fallback: try explicit modify on the component
-    try {
-      await callFirst(
-        ['SCH_PrimitiveComponent.modify', 'sch_PrimitiveComponent.modify'],
-        primitiveId,
-        { property: { OtherProperty: updated } },
-      );
-    } catch {
-      throw newBridgeError(
-        'EASYEDA_API_ERROR',
-        'Pin found but no API available to modify its net property.',
-        'The EasyEDA Pro runtime may not support programmatic pin net assignment.',
-      );
-    }
-  }
-
-  // Establish REAL EasyEDA connectivity: draw a net-named wire stub whose first
-  // endpoint sits on the pin. EasyEDA assigns that pin to `netName`, and pins
-  // that share a net name form one net. The OtherProperty.net set above only
-  // feeds this bridge's own listNetsApi(); the EasyEDA netlister ignores it, so
-  // the wire is what actually connects the pin for ERC / PCB / netlist export.
-  try {
-    const px =
-      typeof targetPin.getState_X === 'function' ? Number(targetPin.getState_X()) : NaN;
-    const py =
-      typeof targetPin.getState_Y === 'function' ? Number(targetPin.getState_Y()) : NaN;
-    if (Number.isFinite(px) && Number.isFinite(py)) {
-      const rot =
-        typeof targetPin.getState_Rotation === 'function'
-          ? Number(targetPin.getState_Rotation())
-          : 0;
-      const rad = (rot * Math.PI) / 180;
-      const STUB = 20;
-      const ex = Math.round(px + STUB * Math.cos(rad));
-      const ey = Math.round(py + STUB * Math.sin(rad));
-      await callFirst(
-        ['SCH_PrimitiveWire.create', 'sch_PrimitiveWire.create'],
-        [px, py, ex, ey],
-        netName,
-      );
-    }
-  } catch (e) {
-    logRecoverableError('connectPinToNet: wire-stub creation failed', e);
-  }
-}
-
-// Resolve a user-supplied schematic component reference — which may be either a
-// real primitiveId OR a human designator like "R1"/"D3"/"LED1_RED" — to the
-// component's real primitiveId. The MCP server's component list strips
-// primitiveIds (its output schema only keeps reference/value/footprint/…), so
-// callers address components by designator; we map that to the id the
-// modify/delete APIs require. Falls back to the input unchanged when no
-// designator matches, so a real primitiveId still passes straight through.
-async function resolveSchComponentId(idOrDesignator: string): Promise<string> {
-  const schCompClass = readFirstPath<any>([
-    'SCH_PrimitiveComponent',
-    'SCH_PrimitiveComponent3',
-    'sch_PrimitiveComponent',
-  ]);
-  if (!schCompClass || typeof schCompClass.getAll !== 'function') return idOrDesignator;
-  let comps: any[] = [];
-  try {
-    comps = (await schCompClass.getAll(undefined, true)) || [];
-  } catch (e) {
-    logRecoverableError('resolveSchComponentId getAll failed', e);
-    return idOrDesignator;
-  }
-  for (const c of comps) {
-    try {
-      if (
-        typeof c.getState_PrimitiveId === 'function' &&
-        String(c.getState_PrimitiveId()) === idOrDesignator
-      ) {
-        return idOrDesignator; // already a real primitiveId
-      }
-    } catch {
-      /* keep scanning */
-    }
-    try {
-      if (typeof c.getState_Designator === 'function' && c.getState_Designator() === idOrDesignator) {
-        const real =
-          typeof c.getState_PrimitiveId === 'function'
-            ? String(c.getState_PrimitiveId())
-            : idOrDesignator;
-        dbg(`resolve "${idOrDesignator}" → designator match, primitiveId=${real}`);
-        return real;
-      }
-    } catch {
-      /* keep scanning */
-    }
-  }
-  dbg(`resolve "${idOrDesignator}" → no designator match (passing through unchanged)`);
-  return idOrDesignator;
-}
+// ── Editor / tab orchestration (headless multi-tab + document targeting) ─────
 
 // Flatten a DMT_EditorControl split-screen tree into a flat tab list. The tree
 // nests tabs under `tabs` and recurses through `children` (IDMT_EditorSplitScreenItem).
@@ -1287,8 +448,8 @@ const CANVAS_DOCUMENT_TYPES = new Set([1, 3, 12, 15, 26, 27]);
 // sandbox), where `instanceof Blob` fails but it still has arrayBuffer()/size.
 function isUsableBlob(value: unknown): value is Blob {
   if (!value || typeof value !== 'object') return false;
-  const b = value as { arrayBuffer?: unknown; size?: unknown };
-  return typeof b.arrayBuffer === 'function' || typeof b.size === 'number';
+  const candidate = value as { arrayBuffer?: unknown; size?: unknown };
+  return typeof candidate.arrayBuffer === 'function' || typeof candidate.size === 'number';
 }
 
 function describeValue(value: unknown): string {
@@ -1311,11 +472,11 @@ async function blobToImagePayload(
   if (typeof typedBlob.arrayBuffer === 'function') {
     const buffer = await typedBlob.arrayBuffer();
     const bytes = new Uint8Array(buffer);
+    if (bytes.length === 0) return null;
     let binary = '';
     for (let i = 0; i < bytes.length; i += 1) {
       binary += String.fromCharCode(bytes[i] as number);
     }
-    if (bytes.length === 0) return null;
     return { imageBase64: btoa(binary), mime: typedBlob.type || 'image/png', bytes: bytes.length };
   }
   if (typeof FileReader !== 'undefined') {
@@ -1342,13 +503,11 @@ async function blobToImagePayload(
 // then (if that yields nothing) resolves actual canvas tabs from the split-screen
 // tree and retries each - so a headless flow with focus on a non-canvas page
 // still gets an image. Returns rich diagnostics when nothing renders.
-async function captureCanvasImage(
-  requestedTabId?: string,
-): Promise<Record<string, unknown>> {
+async function captureCanvasImage(requestedTabId?: string): Promise<Record<string, unknown>> {
   const attempts: Array<{ tabId: string | null; returned: string }> = [];
 
   async function tryGrab(tabId?: string): Promise<Record<string, unknown> | null> {
-    const raw = await callFirst(['dmt_EditorControl.getCurrentRenderedAreaImage'], tabId);
+    const raw = await localCallFirst(['dmt_EditorControl.getCurrentRenderedAreaImage'], tabId);
     attempts.push({ tabId: tabId ?? null, returned: describeValue(raw) });
     return await blobToImagePayload(raw);
   }
@@ -1361,11 +520,11 @@ async function captureCanvasImage(
   //    render the *focused* canvas, so if a background grab yields nothing we
   //    activate that tab and retry once before giving up on it.
   if (!payload) {
-    const tree = (await callFirst(['dmt_EditorControl.getSplitScreenTree'])) as
+    const tree = (await localCallFirst(['dmt_EditorControl.getSplitScreenTree'])) as
       | Record<string, unknown>
       | undefined;
-    canvasTabs = flattenSplitScreenTabs(tree).filter((t) =>
-      CANVAS_DOCUMENT_TYPES.has(Number(t.documentType)),
+    canvasTabs = flattenSplitScreenTabs(tree).filter((tab) =>
+      CANVAS_DOCUMENT_TYPES.has(Number(tab.documentType)),
     );
     for (const tab of canvasTabs) {
       const tabId = typeof tab.tabId === 'string' ? tab.tabId : undefined;
@@ -1376,10 +535,10 @@ async function captureCanvasImage(
       }
       // Activate-then-retry (last resort for focus-only-render builds).
       try {
-        await callFirst(['dmt_EditorControl.activateDocument'], tabId);
-        await new Promise((resolve) => setTimeout(resolve, 150));
-      } catch {
-        /* activation best-effort */
+        await localCallFirst(['dmt_EditorControl.activateDocument'], tabId);
+        await new Promise((resolve) => runtimeTimers.setTimeout(() => resolve(undefined), 150));
+      } catch (error) {
+        log('canvas capture activation failed', String(error));
       }
       payload = await tryGrab(tabId);
       if (payload) break;
@@ -1392,43 +551,140 @@ async function captureCanvasImage(
     reason:
       'getCurrentRenderedAreaImage returned no image for the focused canvas or any open canvas tab. Open/activate a schematic or PCB tab, or pass an explicit tabId.',
     attempts,
-    canvasTabs: canvasTabs.map((t) => ({
-      tabId: t.tabId,
-      title: t.title,
-      documentType: t.documentType,
+    canvasTabs: canvasTabs.map((tab) => ({
+      tabId: tab.tabId,
+      title: tab.title,
+      documentType: tab.documentType,
     })),
   };
 }
 
-async function dispatch(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
-  dbg(`→ ${method} ${safeStringify(params).slice(0, 300)}`);
+// ── Native PCB authoring ─────────────────────────────────────────────────────
+// All signatures below are confirmed against @jlceda/pro-api-types (the official
+// EasyEDA Pro extension API typings). withClassNameVariants() tries both PCB_ and
+// pcb_ casings, so the canonical 'PCB_<Class>.<method>' candidate resolves at runtime.
+
+// EPCB_LayerId values used as the `layer` argument on create(...).
+const PCB_LAYER = {
+  TOP: 1,
+  BOTTOM: 2,
+  TOP_SILK: 3,
+  BOTTOM_SILK: 4,
+  BOARD_OUTLINE: 11,
+  MULTI: 12,
+  DOCUMENT: 13,
+  MECHANICAL: 14,
+} as const;
+
+// Accept either nested [[x,y],...] or flat [x,y,x,y,...] and return [x,y] pairs.
+function toXYPairs(points: unknown): Array<[number, number]> {
+  if (!Array.isArray(points)) return [];
+  if (points.length > 0 && Array.isArray(points[0])) {
+    return (points as unknown[][]).map((point) => [Number(point[0]), Number(point[1])]);
+  }
+  const flat = (points as unknown[]).map(Number);
+  const pairs: Array<[number, number]> = [];
+  for (let i = 0; i + 1 < flat.length; i += 2) pairs.push([flat[i] as number, flat[i + 1] as number]);
+  return pairs;
+}
+
+// Normalize a create(...) result (an IPCB_Primitive* instance or id string) to
+// a { primitiveId } shape for the MCP layer.
+function pcbId(result: unknown, prefix: string): { primitiveId: string } {
+  let id = '';
+  if (typeof result === 'string') {
+    id = result;
+  } else if (result && typeof result === 'object') {
+    const record = result as Record<string, unknown>;
+    const getter = record.getState_PrimitiveId;
+    const fromGetter =
+      typeof getter === 'function' ? (getter as () => unknown).call(record) : undefined;
+    id = String(record.primitiveId ?? record.uuid ?? record.id ?? fromGetter ?? '');
+  }
+  return { primitiveId: id || `${prefix}_${Date.now()}` };
+}
+
+// Build an EasyEDA TPCB_PolygonSourceArray from a shape descriptor. Grammar (per
+// the official typings): polygon = [x1,y1,'L',x2,y2,...]; rect = ['R',x,y,w,h,rot,round];
+// circle = ['CIRCLE',cx,cy,r]. A single polygon auto-closes. Throws on a
+// degenerate (<3-point) polygon or any non-finite coordinate.
+function polygonSource(shape: string, params: Record<string, unknown>): Array<string | number> {
+  let source: Array<string | number>;
+  if (shape === 'circle') {
+    source = ['CIRCLE', Number(params.cx), Number(params.cy), Number(params.radius)];
+  } else if (shape === 'rect') {
+    source = [
+      'R',
+      Number(params.x),
+      Number(params.y),
+      Number(params.width),
+      Number(params.height),
+      Number(params.rotation ?? 0),
+      Number(params.round ?? 0),
+    ];
+  } else {
+    const pairs = toXYPairs(params.points);
+    if (pairs.length < 3) {
+      throw newBridgeError(
+        'INVALID_POLYGON',
+        `polygon region needs at least 3 points (got ${pairs.length}).`,
+        'Pass a points array describing a closed area.',
+      );
+    }
+    source = [];
+    pairs.forEach(([x, y], index) => {
+      if (index === 0) source.push(x, y, 'L');
+      else source.push(x, y);
+    });
+  }
+  for (const value of source) {
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      throw newBridgeError(
+        'INVALID_GEOMETRY',
+        `${shape} region has a non-finite coordinate (${String(value)}).`,
+        'Provide every coordinate/size field required for this shape.',
+      );
+    }
+  }
+  return source;
+}
+
+// Build an IPCB_Polygon (the complexPolygon/polygon arg for Fill/Pour/Region/
+// Polyline) via PCB_MathPolygon.createPolygon. Throws INVALID_POLYGON if the
+// runtime cannot build a polygon, rather than passing a raw source array that
+// PCB_PrimitiveFill.create (which requires an IPCB_Polygon) would reject.
+async function buildPolygon(shape: string, params: Record<string, unknown>): Promise<unknown> {
+  const source = polygonSource(shape, params);
+  const polygon = await localCallFirst(['PCB_MathPolygon.createPolygon'], source);
+  if (!polygon) {
+    throw newBridgeError(
+      'INVALID_POLYGON',
+      `PCB_MathPolygon.createPolygon could not build a ${shape} polygon.`,
+      'Check that the shape parameters (points/rect/circle) describe a valid enclosed area.',
+    );
+  }
+  return polygon;
+}
+
+async function dispatchLocalExtensionMethod(
+  method: string,
+  params: Record<string, unknown>,
+): Promise<unknown> {
   switch (method) {
-    case 'project.open':
-      return callFirst(['dmt_Project.openProject', 'project.open'], params.projectId);
-    case 'project.save':
-      return callFirst([
-        'dmt_Workspace.saveAll',
-        'dmt_Workspace.saveActiveDocument',
-        'sch_Document.save',
-        'pcb_Document.save',
-        'pnl_Document.save',
-      ]);
-    case 'project.export':
-      return callFirst(['dmt_Project.export', 'project.export'], params);
-    // ---- Editor / tab orchestration (headless multi-tab, plan section 2.1) ----
-    // All wrap eda.dmt_EditorControl / dmt_Project. These are tab-addressable and
-    // do NOT mutate design content, so an agent can navigate/open/inspect any tab
-    // in the currently-open project without the user focusing it manually.
+    // ---- Editor / tab orchestration (headless multi-tab, document targeting) ----
+    // All wrap DMT_EditorControl / DMT_Project. These are tab-addressable and do
+    // NOT mutate design content, so an agent can navigate/open/inspect any tab in
+    // the currently-open project without the user focusing it manually.
     case 'project.getInfo':
-      return callFirst(['dmt_Project.getCurrentProjectInfo']);
+      return localCallFirst(['dmt_Project.getCurrentProjectInfo']);
     case 'editor.listTabs': {
-      const tree = (await callFirst(['dmt_EditorControl.getSplitScreenTree'])) as
+      const tree = (await localCallFirst(['dmt_EditorControl.getSplitScreenTree'])) as
         | Record<string, unknown>
         | undefined;
       return { tabs: flattenSplitScreenTabs(tree), tree: tree ?? null };
     }
     case 'editor.openDocument': {
-      const tabId = (await callFirst(
+      const tabId = (await localCallFirst(
         ['dmt_EditorControl.openDocument'],
         params.documentUuid,
         params.splitScreenId,
@@ -1443,705 +699,103 @@ async function dispatch(method: string, params: Record<string, unknown> = {}): P
       return { tabId };
     }
     case 'editor.activateDocument': {
-      const ok = (await callFirst(
+      const ok = (await localCallFirst(
         ['dmt_EditorControl.activateDocument'],
         params.tabId,
       )) as boolean;
       return { ok: ok === true };
     }
     case 'editor.closeDocument': {
-      const ok = (await callFirst(['dmt_EditorControl.closeDocument'], params.tabId)) as boolean;
+      const ok = (await localCallFirst(
+        ['dmt_EditorControl.closeDocument'],
+        params.tabId,
+      )) as boolean;
       return { ok: ok === true };
     }
     case 'editor.screenshot':
       return captureCanvasImage(typeof params.tabId === 'string' ? params.tabId : undefined);
     case 'editor.zoomToAll':
-      return callFirst(['dmt_EditorControl.zoomToAllPrimitives'], params.tabId);
+      return localCallFirst(['dmt_EditorControl.zoomToAllPrimitives'], params.tabId);
     case 'editor.tileAll': {
-      const ok = (await callFirst(['dmt_EditorControl.tileAllDocumentToSplitScreen'])) as boolean;
+      const ok = (await localCallFirst([
+        'dmt_EditorControl.tileAllDocumentToSplitScreen',
+      ])) as boolean;
       return { ok: ok === true };
     }
-    case 'schematic.listNets':
-      return listNetsApi();
-    case 'schematic.getNetDetail': {
-      const netName = params.netName as string;
-      const allNets = (await listNetsApi()) as Array<{ netName: string; nodes: unknown[] }>;
-      const match = allNets.find((n) => n.netName === netName);
-      if (!match)
-        throw newBridgeError(
-          'NET_NOT_FOUND',
-          `Net "${netName}" not found`,
-          'Check net name spelling.',
-        );
-      return match;
-    }
-    case 'schematic.listComponents':
-      return listComponentsApi();
-    case 'schematic.searchDevice':
-      return callFirst(
-        ['LIB_Device.search', 'lib_Device.search'],
-        params.key,
-        params.libraryUuid,
-        params.classification,
-        params.symbolType,
-        params.itemsOfPage,
-        params.page,
-      );
-    case 'schematic.placeComponent':
-      // SCH_PrimitiveComponent.create expects (deviceItem, x, y) only.
-      // Extra arguments cause the API to hang or reject.
-      return callFirst(
-        ['SCH_PrimitiveComponent.create', 'sch_PrimitiveComponent.create'],
-        params.deviceItem,
-        params.x,
-        params.y,
-      );
-    case 'schematic.addWire': {
-      const pts = Array.isArray(params.points) ? params.points.flatMap((p: any) => [p.x, p.y]) : [];
-      return callFirst(
-        ['SCH_PrimitiveWire.create', 'sch_PrimitiveWire.create'],
-        pts,
-        params.netName,
-        params.color,
-        params.lineWidth,
-        params.lineType,
-      );
-    }
-    case 'schematic.deletePrimitive': {
-      const rawIds = Array.isArray(params.primitiveIds) ? (params.primitiveIds as string[]) : [];
-      const resolvedIds = await Promise.all(rawIds.map((pid) => resolveSchComponentId(String(pid))));
-      return callFirst(
-        [
-          'SCH_PrimitiveComponent.delete',
-          'SCH_PrimitiveWire.delete',
-          'sch_PrimitiveComponent.delete',
-          'sch_PrimitiveWire.delete',
-        ],
-        resolvedIds,
-      );
-    }
-    case 'schematic.modifyPrimitive': {
-      const resolvedId = await resolveSchComponentId(String(params.primitiveId ?? ''));
-      return callFirst(
-        [
-          'SCH_PrimitiveComponent.modify',
-          'SCH_PrimitiveWire.modify',
-          'sch_PrimitiveComponent.modify',
-          'sch_PrimitiveWire.modify',
-        ],
-        resolvedId,
-        params.property,
-      );
-    }
-    case 'schematic.createNetFlag': {
-      const nfX = params.x as number;
-      const nfY = params.y as number;
-      const nfName = params.netName as string;
-      const nfRotation = (params.rotation as number) ?? 0;
-      // Real EasyEDA API is SCH_PrimitiveComponent.createNetFlag(identification,
-      // net, x, y, rotation?, mirror?) — identification ∈ Power | Ground |
-      // AnalogGround | ProtectGround. Infer it from the net name.
-      const nfUpper = String(nfName).toUpperCase();
-      const nfId = /^A(?:GND|NALOG)|ANALOG_?GND/.test(nfUpper)
-        ? 'AnalogGround'
-        : /PGND|PROTECT|EARTH|CHASSIS/.test(nfUpper)
-          ? 'ProtectGround'
-          : /GND|GROUND|VSS|VEE/.test(nfUpper)
-            ? 'Ground'
-            : 'Power';
-      const nfResult = await callFirst(
-        ['SCH_PrimitiveComponent.createNetFlag', 'sch_PrimitiveComponent.createNetFlag'],
-        nfId,
-        nfName,
-        nfX,
-        nfY,
-        nfRotation,
-      );
-      const nfPrimitiveId =
-        typeof nfResult === 'object' && nfResult !== null
-          ? String(
-              (nfResult as Record<string, unknown>).primitiveId ??
-                (nfResult as Record<string, unknown>).uuid ??
-                '',
-            )
-          : '';
-      return {
-        primitiveId: nfPrimitiveId || `netflag_${Date.now()}`,
-        netName: nfName,
-      };
-    }
-    case 'schematic.createNetPort': {
-      const npX = params.x as number;
-      const npY = params.y as number;
-      const npName = params.netName as string;
-      const npType = String((params.portType as string) ?? 'passive').toLowerCase();
-      const npRotation = (params.rotation as number) ?? 0;
-      // Real EasyEDA API is SCH_PrimitiveComponent.createNetPort(direction, net,
-      // x, y, rotation?, mirror?) — direction ∈ IN | OUT | BI.
-      const npDir = npType === 'output' ? 'OUT' : npType === 'input' ? 'IN' : 'BI';
-      const npResult = await callFirst(
-        ['SCH_PrimitiveComponent.createNetPort', 'sch_PrimitiveComponent.createNetPort'],
-        npDir,
-        npName,
-        npX,
-        npY,
-        npRotation,
-      );
-      const npPrimitiveId =
-        typeof npResult === 'object' && npResult !== null
-          ? String(
-              (npResult as Record<string, unknown>).primitiveId ??
-                (npResult as Record<string, unknown>).uuid ??
-                '',
-            )
-          : '';
-      return {
-        primitiveId: npPrimitiveId || `netport_${Date.now()}`,
-        netName: npName,
-      };
-    }
-    case 'schematic.connectPinToNet': {
-      await connectPinToNetImpl(
-        params.primitiveId as string,
-        params.pinNumber as string,
-        params.netName as string,
-      );
-      return { connected: true };
-    }
-    case 'schematic.connectPinsByNet': {
-      const pins = params.pins as Array<{ primitiveId: string; pinNumber: string }>;
-      let connectedCount = 0;
-      for (const pin of pins || []) {
-        try {
-          await connectPinToNetImpl(pin.primitiveId, pin.pinNumber, params.netName as string);
-          connectedCount++;
-        } catch (err) {
-          logRecoverableError(
-            `connectPinToNet failed for ${pin.primitiveId}/${pin.pinNumber}`,
-            err,
-          );
-        }
-      }
-      return { count: connectedCount };
-    }
-    case 'schematic.validateNetlist': {
-      const netlistData = (await listNetsApi()) as Array<{
-        netName: string;
-        nodes: Array<{ component: string; pin: string }>;
-      }>;
-      const comps = (await listComponentsApi()) as Array<{
-        reference: string;
-        value: string;
-        footprint: string;
-        lcsc: string;
-      }>;
-      const connectedRefs = new Set<string>();
-      const connectedPins = new Set<string>();
-      const nets = (netlistData || []).map((n) => {
-        const refs = [...new Set((n.nodes || []).map((node) => node.component))];
-        const pins = (n.nodes || []).map((node) => node.pin);
-        refs.forEach((r) => connectedRefs.add(r));
-        pins.forEach((p) => connectedPins.add(p));
-        return {
-          netName: n.netName,
-          refs,
-          pins,
-          hasNetFlag: true,
-        };
-      });
-      // Floating pins: components that exist but aren't in any net's nodes
-      const floatingPins: Array<{ primitiveId: string; pinNumber: string }> = [];
-      const schCompClass = readFirstPath<any>([
-        'SCH_PrimitiveComponent',
-        'SCH_PrimitiveComponent3',
-        'sch_PrimitiveComponent',
-      ]);
-      if (schCompClass && typeof schCompClass.getAll === 'function') {
-        const allComps = await schCompClass.getAll(undefined, true);
-        for (const c of allComps || []) {
-          const ref = typeof c.getState_Designator === 'function' ? c.getState_Designator() : '';
-          if (ref && typeof c.getAllPins === 'function') {
-            try {
-              const pins = await c.getAllPins();
-              for (const p of pins || []) {
-                if (typeof p.getState_PinNumber !== 'function') continue;
-                let pinNet = '';
-                if (typeof p.getState_OtherProperty === 'function') {
-                  const other = p.getState_OtherProperty();
-                  if (other) pinNet = String(other.net || other.Net || '');
-                }
-                if (!pinNet) {
-                  floatingPins.push({
-                    primitiveId: ref,
-                    pinNumber: String(p.getState_PinNumber()),
-                  });
-                }
-              }
-            } catch {
-              // skip component
-            }
-          }
-        }
-      }
-      const warnings: string[] = [];
-      const totalRefs = comps.length;
-      if (floatingPins.length > 0) {
-        warnings.push(`${floatingPins.length} pin(s) are not connected to any net.`);
-      }
-      if (connectedRefs.size < totalRefs) {
-        warnings.push(`${totalRefs - connectedRefs.size} component(s) have no net connections.`);
-      }
-      return {
-        nets,
-        floatingPins,
-        wiresWithoutNetlist: [],
-        warnings,
-      };
-    }
-    case 'system.apiInventory':
-      return inspectApiInventory(typeof params.filter === 'string' ? params.filter : undefined);
-    case 'system.inspectComponents':
-      return inspectComponentsApi(typeof params.limit === 'number' ? params.limit : 5);
-    case 'system.inspectWires':
-      return inspectWiresApi(typeof params.limit === 'number' ? params.limit : 10);
-    case 'api.call':
-      return callAllowedApi(
-        typeof params.path === 'string' ? params.path : '',
-        Array.isArray(params.args) ? params.args : [],
-      );
-    case 'api.execute': {
-      const code = typeof params.code === 'string' ? params.code : '';
-      if (!code.trim())
-        throw newBridgeError(
-          'INVALID_PARAMS',
-          'code is required',
-          'Provide JavaScript code to execute',
-        );
-      const AsyncFunction = Object.getPrototypeOf(async function () {})
-        .constructor as FunctionConstructor;
-      const edaGlobal = (() => {
-        try {
-          if (typeof eda !== 'undefined' && eda) return eda;
-        } catch {}
-        return (globalThis as any).eda;
-      })();
-      const fn = new AsyncFunction('eda', code) as (eda: unknown) => Promise<unknown>;
-      const result = await fn(edaGlobal);
-      return { result: normalizeValue(result, 5) };
-    }
-    case 'board.listLayers':
-      return listLayersApi();
-    case 'board.getStackup':
-      return getStackupApi();
-    case 'board.getDimensions':
-      return getDimensionsApi();
-    case 'board.getFeatures':
-      return getFeaturesApi();
-    case 'board.exportGerbers':
-      return callFirst(['dmt_PCB.exportGerbers', 'board.exportGerbers'], params);
-    case 'system.getStatus': {
-      const globals: Record<string, unknown> = {};
-      try {
-        globals.typeof_api = typeof (globalThis as any).api;
-        globals.typeof_eda = typeof (globalThis as any).eda;
-        globals.typeof_EDA = typeof (globalThis as any).EDA;
 
-        try {
-          globals.typeof_local_api = typeof api;
-        } catch (e) {
-          globals.typeof_local_api_err = String(e);
-        }
-        try {
-          globals.typeof_local_eda = typeof eda;
-        } catch (e) {
-          globals.typeof_local_eda_err = String(e);
-        }
-        try {
-          globals.typeof_local_EDA = typeof EDA;
-        } catch (e) {
-          globals.typeof_local_EDA_err = String(e);
-        }
-
-        if (typeof eda !== 'undefined' && eda) {
-          try {
-            globals.eda_keys = Object.getOwnPropertyNames(eda);
-          } catch (e) {
-            globals.eda_keys_err = String(e);
-          }
-          try {
-            const edaKeys: string[] = [];
-            for (const key in eda) {
-              edaKeys.push(key);
-            }
-            globals.eda_for_in_keys = edaKeys;
-          } catch (e) {
-            globals.eda_for_in_keys_err = String(e);
-          }
-
-          const getAllPropertyNames = (obj: any): string[] => {
-            let props: string[] = [];
-            let currentObj = obj;
-            while (currentObj && currentObj !== Object.prototype) {
-              try {
-                props = props.concat(Object.getOwnPropertyNames(currentObj));
-              } catch (e) {
-                logRecoverableError('failed to read debug probe property names', e);
-              }
-              try {
-                currentObj = Object.getPrototypeOf(currentObj);
-              } catch (e) {
-                logRecoverableError('failed to read debug probe prototype', e);
-                break;
-              }
-            }
-            return Array.from(new Set(props)).filter(
-              (p) => !['length', 'name', 'prototype', 'constructor'].includes(p),
-            );
-          };
-
-          try {
-            if ((eda as any).sch_PrimitiveComponent) {
-              globals.sch_PrimitiveComponent_all_keys = getAllPropertyNames(
-                (eda as any).sch_PrimitiveComponent,
-              );
-            }
-          } catch (e) {
-            globals.sch_PrimitiveComponent_err = String(e);
-          }
-
-          try {
-            if ((eda as any).sch_Document) {
-              globals.sch_Document_all_keys = getAllPropertyNames((eda as any).sch_Document);
-            }
-          } catch (e) {
-            globals.sch_Document_err = String(e);
-          }
-
-          try {
-            if ((eda as any).pcb_Document) {
-              globals.pcb_Document_all_keys = getAllPropertyNames((eda as any).pcb_Document);
-            }
-          } catch (e) {
-            globals.pcb_Document_err = String(e);
-          }
-
-          try {
-            if ((eda as any).dmt_Schematic) {
-              globals.dmt_Schematic_all_keys = getAllPropertyNames((eda as any).dmt_Schematic);
-            }
-          } catch (e) {
-            globals.dmt_Schematic_err = String(e);
-          }
-
-          try {
-            if ((eda as any).dmt_Project) {
-              globals.dmt_Project_all_keys = getAllPropertyNames((eda as any).dmt_Project);
-            }
-          } catch (e) {
-            globals.dmt_Project_err = String(e);
-          }
-
-          try {
-            if ((eda as any).dmt_Pcb) {
-              globals.dmt_Pcb_all_keys = getAllPropertyNames((eda as any).dmt_Pcb);
-            }
-          } catch (e) {
-            globals.dmt_Pcb_err = String(e);
-          }
-        }
-
-        if (typeof EDA !== 'undefined' && EDA) {
-          try {
-            globals.EDA_keys = Object.getOwnPropertyNames(EDA as object);
-          } catch (e) {
-            globals.EDA_keys_err = String(e);
-          }
-          try {
-            const edaKeys: string[] = [];
-            for (const key in EDA as object) {
-              edaKeys.push(key);
-            }
-            globals.EDA_for_in_keys = edaKeys;
-          } catch (e) {
-            globals.EDA_for_in_keys_err = String(e);
-          }
-        }
-
-        try {
-          const globalKeys = Object.getOwnPropertyNames(globalThis);
-          globals.globalThis_matched_keys = globalKeys.filter((k) => {
-            const kl = k.toLowerCase();
-            return (
-              kl.includes('dmt') ||
-              kl.includes('eda') ||
-              kl.includes('schematic') ||
-              kl.includes('pcb') ||
-              kl.includes('api')
-            );
-          });
-        } catch (e) {
-          globals.globalThis_keys_err = String(e);
-        }
-
-        try {
-          const allGlobalKeys: string[] = [];
-          for (const key in globalThis) {
-            const kl = key.toLowerCase();
-            if (
-              kl.includes('dmt') ||
-              kl.includes('eda') ||
-              kl.includes('schematic') ||
-              kl.includes('pcb') ||
-              kl.includes('api')
-            ) {
-              allGlobalKeys.push(key);
-            }
-          }
-          globals.globalThis_for_in_matched_keys = allGlobalKeys;
-        } catch (e) {
-          globals.globalThis_for_in_err = String(e);
-        }
-      } catch (e) {
-        globals.error = String(e);
-      }
-
-      const hasEdaLocal = typeof eda !== 'undefined';
-      const hasEDALocal = typeof EDA !== 'undefined';
-      const hasDMTLocal = typeof eda !== 'undefined' && eda && 'DMT_Schematic' in (eda as any);
-      const hasDMTEDA = typeof EDA !== 'undefined' && EDA && 'DMT_Schematic' in (EDA as any);
-
-      return {
-        bridgeVersion: BRIDGE_VERSION,
-        capabilities: [
-          'project.open',
-          'project.save',
-          'project.export',
-          'schematic.listNets',
-          'schematic.getNetDetail',
-          'schematic.listComponents',
-          'schematic.searchDevice',
-          'schematic.placeComponent',
-          'schematic.addWire',
-          'schematic.deletePrimitive',
-          'schematic.modifyPrimitive',
-          'schematic.createNetFlag',
-          'schematic.createNetPort',
-          'schematic.connectPinToNet',
-          'schematic.connectPinsByNet',
-          'schematic.validateNetlist',
-          'system.apiInventory',
-          'system.inspectComponents',
-          'system.inspectWires',
-          'api.call',
-          'api.execute',
-          'board.listLayers',
-          'board.getStackup',
-          'board.getDimensions',
-          'board.getFeatures',
-          'board.exportGerbers',
-          'bom.generate',
-          'bom.validate',
-          'inventory.search',
-          'inventory.getPrice',
-          'design.ruleCheck',
-          'design.erc',
-          'design.drc',
-          'export.pickPlace',
-          'export.pdf',
-          'export.netlist',
-          'pcb.placeComponent',
-          'pcb.addTrack',
-          'pcb.addVia',
-          'pcb.addZone',
-          'pcb.deleteComponent',
-          'pcb.modifyComponent',
-          'pcb.addBoardOutline',
-          'pcb.addPad',
-          'pcb.addHole',
-          'pcb.addSilkText',
-          'pcb.addSilkLine',
-          'pcb.addSolidRegion',
-          'pcb.save',
-          'pcb.importProjectFile',
-          'pcb.importSesRoute',
-        ],
-        devMode: false,
-        globals: globals,
-        hasEda: hasEdaLocal || hasEDALocal,
-        hasDMT: 'DMT_Schematic' in globalThis || !!hasDMTLocal || !!hasDMTEDA,
-      };
-    }
-    case 'bom.generate':
-      return generateBomApi(params);
-    case 'bom.validate': {
-      const comps = (await listComponentsApi()) as any[];
-      return { totalParts: comps.length, missing: [], obsolete: [], alternates: [] };
-    }
-    case 'inventory.search':
-      return [];
-    case 'inventory.getPrice':
-      return null;
-    case 'design.ruleCheck':
-      return callFirst(['dmt_DRC.runRuleCheck', 'design.ruleCheck'], params);
-    case 'design.erc':
-      return callFirst(['dmt_ERC.run', 'design.erc'], params);
-    case 'design.drc':
-      return callFirst(['dmt_DRC.run', 'design.drc'], params);
-    case 'export.pickPlace':
-      return callFirst(
-        ['dmt_Project.exportPickPlace', 'dmt_PCB.exportPickAndPlace', 'board.exportPickPlace'],
-        params,
-      );
-    case 'export.pdf':
-      return callFirst(
-        ['dmt_Schematic.exportPdf', 'dmt_PCB.exportPdf', 'sch_Document.exportPdf'],
-        params.what === 'board' ? params : { ...params, type: 'schematic' },
-      );
-    case 'export.netlist':
-      return callFirst(['dmt_Project.exportNetlist', 'sch_Document.exportNetlist'], params);
-    // ----- PCB authoring (build 0.6.0: real EasyEDA Pro class/method names) -----
-    case 'pcb.placeComponent': {
-      // PCB_PrimitiveComponent.create(componentItem, layer, x, y, rotation?).
-      // componentItem MUST be a library ITEM OBJECT ({libraryUuid,uuid} or a
-      // LIB_* search result) — NOT a bare string (mirrors the schematic fix that
-      // stopped the API hanging on extra/string args).
-      const compItem =
-        (params.component as unknown) ??
-        (params.libraryUuid && params.uuid
-          ? { libraryUuid: params.libraryUuid, uuid: params.uuid }
-          : params.footprint);
-      const pcRes = await callFirst(
-        ['PCB_PrimitiveComponent.create', 'pcb_PrimitiveComponent.create'],
-        compItem,
-        params.layer ?? PCB_LAYER.TOP,
-        params.x,
-        params.y,
-        params.rotation ?? 0,
-      );
-      return pcbId(pcRes, 'pcbcomp');
-    }
-    case 'pcb.addTrack': {
-      // PCB_PrimitiveLine.create(net, layer, x1,y1,x2,y2, width) — one call per
-      // straight segment (NOT PCB_PrimitiveTrack, NOT a points[] array).
-      const tkPairs = toXYPairs(params.points);
-      const tkNet = (params.netName as string) ?? '';
-      const tkLayer = params.layer ?? PCB_LAYER.TOP;
-      const tkWidth = params.width;
-      const tkIds: string[] = [];
-      for (let i = 0; i + 1 < tkPairs.length; i++) {
-        const seg = await callFirst(
-          ['PCB_PrimitiveLine.create', 'pcb_PrimitiveLine.create'],
-          tkNet,
-          tkLayer,
-          tkPairs[i][0],
-          tkPairs[i][1],
-          tkPairs[i + 1][0],
-          tkPairs[i + 1][1],
-          tkWidth,
-        );
-        tkIds.push(pcbId(seg, 'trk').primitiveId);
-      }
-      return { primitiveId: tkIds[0] ?? `trk_${Date.now()}`, segmentIds: tkIds };
-    }
-    case 'pcb.addVia': {
-      // PCB_PrimitiveVia.create(net, x, y, holeDiameter(drill), diameter(outer), ...)
-      // net is FIRST; drill precedes the outer copper diameter.
-      const viaRes = await callFirst(
-        ['PCB_PrimitiveVia.create', 'pcb_PrimitiveVia.create'],
-        (params.netName as string) ?? '',
-        params.x,
-        params.y,
-        params.holeSize,
-        params.outerDiameter,
-      );
-      return pcbId(viaRes, 'via');
-    }
-    case 'pcb.addZone': {
-      // PCB_PrimitivePour.create(net, layer, complexPolygon: IPCB_Polygon, ...).
-      // Filled copper (PCB_PrimitivePoured) is computed by the editor, not authored.
-      const znPoly = await buildPolygon('polygon', params);
-      const znRes = await callFirst(
-        ['PCB_PrimitivePour.create', 'pcb_PrimitivePour.create'],
-        (params.netName as string) ?? '',
-        params.layer ?? PCB_LAYER.TOP,
-        znPoly,
-      );
-      return pcbId(znRes, 'pour');
-    }
+    // ---- Native PCB authoring ----
     case 'pcb.addBoardOutline': {
       // Board frame = a single PCB_PrimitivePolyline on layer 11 (BOARD_OUTLINE) —
       // the canonical representation (EasyEDA's own default board outline is
-      // exactly a CIRCLE/rect polyline on layer 11). Handles circle/rect/polygon
-      // uniformly via the shared polygon builder, which validates finite coords
-      // and minimum points.
+      // exactly a CIRCLE/rect polyline on layer 11).
       //
       // IMPORTANT: PCB_PrimitiveArc.create returns an id but does NOT register in
       // EasyEDA Pro's current build (verified live 2026-07-03) — the outline is
       // authored as a polyline, never as arcs.
-      const boWidth = Number(params.lineWidth ?? 0.2);
-      const boShape = String(params.shape ?? 'rect');
-      const boPolygon = await buildPolygon(boShape, params);
-      const boRes = await callFirst(
-        ['PCB_PrimitivePolyline.create', 'pcb_PrimitivePolyline.create'],
+      const outlineWidth = Number(params.lineWidth ?? 0.2);
+      const outlineShape = String(params.shape ?? 'rect');
+      const outlinePolygon = await buildPolygon(outlineShape, params);
+      const outlineResult = await localCallFirst(
+        ['PCB_PrimitivePolyline.create'],
         '',
         PCB_LAYER.BOARD_OUTLINE,
-        boPolygon,
-        boWidth,
+        outlinePolygon,
+        outlineWidth,
       );
-      return pcbId(boRes, 'outline');
+      return pcbId(outlineResult, 'outline');
     }
     case 'pcb.addPad': {
       // PCB_PrimitivePad.create(layer, padNumber, x, y, rotation, padShape, net, hole, ...)
       // padShape default ['ELLIPSE', w, h]; hole null = SMD, ['ROUND', d] = THT.
-      const pdShape =
+      const padShape =
         (params.padShape as unknown) ??
         ['ELLIPSE', Number(params.width ?? 1.5), Number(params.height ?? params.width ?? 1.5)];
-      const pdHole =
+      const padHole =
         (params.hole as unknown) ??
         (params.holeDiameter ? ['ROUND', Number(params.holeDiameter)] : null);
-      const pdRes = await callFirst(
-        ['PCB_PrimitivePad.create', 'pcb_PrimitivePad.create'],
-        params.layer ?? (pdHole ? PCB_LAYER.MULTI : PCB_LAYER.TOP),
+      const padResult = await localCallFirst(
+        ['PCB_PrimitivePad.create'],
+        params.layer ?? (padHole ? PCB_LAYER.MULTI : PCB_LAYER.TOP),
         String(params.padNumber ?? '1'),
         params.x,
         params.y,
         params.rotation ?? 0,
-        pdShape,
+        padShape,
         (params.netName as string) ?? '',
-        pdHole,
+        padHole,
       );
-      return pcbId(pdRes, 'pad');
+      return pcbId(padResult, 'pad');
     }
     case 'pcb.addHole': {
       // No dedicated hole class: NPTH = pad on MULTI(12) with a hole and
       // metallization=false; plated mounting hole = metallization=true.
-      const hlDia = Number(params.holeDiameter ?? params.diameter ?? 1);
-      const hlHole = (params.hole as unknown) ?? ['ROUND', hlDia];
-      const hlShape =
-        (params.padShape as unknown) ?? ['ELLIPSE', hlDia + 0.2, hlDia + 0.2];
-      const hlRes = await callFirst(
-        ['PCB_PrimitivePad.create', 'pcb_PrimitivePad.create'],
+      const holeDiameter = Number(params.holeDiameter ?? params.diameter ?? 1);
+      const hole = (params.hole as unknown) ?? ['ROUND', holeDiameter];
+      const holeShape =
+        (params.padShape as unknown) ?? ['ELLIPSE', holeDiameter + 0.2, holeDiameter + 0.2];
+      const holeResult = await localCallFirst(
+        ['PCB_PrimitivePad.create'],
         PCB_LAYER.MULTI,
         String(params.padNumber ?? '1'),
         params.x,
         params.y,
         0,
-        hlShape,
+        holeShape,
         '',
-        hlHole,
+        hole,
         0,
         0,
         0,
         params.plated === true,
       );
-      return pcbId(hlRes, 'hole');
+      return pcbId(holeResult, 'hole');
     }
     case 'pcb.addSilkText': {
       // PCB_PrimitiveString.create(layer, x, y, text, fontFamily, fontSize,
       // lineWidth, alignMode, rotation, reverse, expansion, mirror, primitiveLock).
       // alignMode 5 = CENTER. fontFamily must be pre-imported into EasyEDA.
-      const stRes = await callFirst(
-        ['PCB_PrimitiveString.create', 'pcb_PrimitiveString.create'],
+      const textResult = await localCallFirst(
+        ['PCB_PrimitiveString.create'],
         params.layer ?? PCB_LAYER.TOP_SILK,
         params.x,
         params.y,
@@ -2156,39 +810,41 @@ async function dispatch(method: string, params: Record<string, unknown> = {}): P
         params.mirror === true,
         false,
       );
-      return pcbId(stRes, 'silktext');
+      return pcbId(textResult, 'silktext');
     }
     case 'pcb.addSilkLine': {
       // Silkscreen artwork = PCB_PrimitiveLine on layer 3|4, one call per segment.
-      const slPairs = toXYPairs(params.points);
-      const slLayer = params.layer ?? PCB_LAYER.TOP_SILK;
-      const slWidth = Number(params.lineWidth ?? params.width ?? 0.15);
-      const slIds: string[] = [];
-      for (let i = 0; i + 1 < slPairs.length; i++) {
-        const seg = await callFirst(
-          ['PCB_PrimitiveLine.create', 'pcb_PrimitiveLine.create'],
+      const silkPairs = toXYPairs(params.points);
+      const silkLayer = params.layer ?? PCB_LAYER.TOP_SILK;
+      const silkWidth = Number(params.lineWidth ?? params.width ?? 0.15);
+      const silkIds: string[] = [];
+      for (let i = 0; i + 1 < silkPairs.length; i += 1) {
+        const start = silkPairs[i] as [number, number];
+        const end = silkPairs[i + 1] as [number, number];
+        const segment = await localCallFirst(
+          ['PCB_PrimitiveLine.create'],
           '',
-          slLayer,
-          slPairs[i][0],
-          slPairs[i][1],
-          slPairs[i + 1][0],
-          slPairs[i + 1][1],
-          slWidth,
+          silkLayer,
+          start[0],
+          start[1],
+          end[0],
+          end[1],
+          silkWidth,
         );
-        slIds.push(pcbId(seg, 'silkline').primitiveId);
+        silkIds.push(pcbId(segment, 'silkline').primitiveId);
       }
-      return { primitiveId: slIds[0] ?? `silkline_${Date.now()}`, segmentIds: slIds };
+      return { primitiveId: silkIds[0] ?? `silkline_${Date.now()}`, segmentIds: silkIds };
     }
     case 'pcb.addSolidRegion': {
       // PCB_PrimitiveFill.create(layer, complexPolygon: IPCB_Polygon, net?, fillMode?, lineWidth?)
-      const srPoly = await buildPolygon(String(params.shape ?? 'polygon'), params);
-      const srRes = await callFirst(
-        ['PCB_PrimitiveFill.create', 'pcb_PrimitiveFill.create'],
+      const fillPolygon = await buildPolygon(String(params.shape ?? 'polygon'), params);
+      const fillResult = await localCallFirst(
+        ['PCB_PrimitiveFill.create'],
         params.layer ?? PCB_LAYER.TOP,
-        srPoly,
+        fillPolygon,
         (params.netName as string) ?? '',
       );
-      return pcbId(srRes, 'fill');
+      return pcbId(fillResult, 'fill');
     }
     case 'pcb.save': {
       // PCB_Document.save(uuid) — persists extension-authored primitives (a
@@ -2203,77 +859,482 @@ async function dispatch(method: string, params: Record<string, unknown> = {}): P
           'Pass documentUuid (the board uuid) — PCB_Document.save() will not persist authored primitives without it.',
         );
       }
-      return callFirst(['PCB_Document.save', 'pcb_Document.save'], saveUuid);
+      return localCallFirst(['PCB_Document.save'], saveUuid);
     }
     case 'pcb.importProjectFile': {
       // Read a local file (desktop client only; needs external-interaction perm)
       // and import it via the File>Import engine (KiCad/Altium/EAGLE/...).
-      const ipFile = await callFirst(
-        ['SYS_FileSystem.readFileFromFileSystem', 'sys_FileSystem.readFileFromFileSystem'],
+      const importFile = await localCallFirst(
+        ['SYS_FileSystem.readFileFromFileSystem'],
         params.filePath,
       );
-      if (!ipFile) {
+      if (!importFile) {
         throw newBridgeError(
           'FILE_NOT_READ',
           `Could not read file: ${String(params.filePath)}`,
           'Path must be absolute + exist; readFileFromFileSystem is desktop-client only and needs the extension external-interaction permission.',
         );
       }
-      const ipProps =
-        (params.props as unknown) ?? {
-          importOption: 'ImportDocumentExtractLibraries',
-          associateFootprint: true,
-          associate3DModel: true,
-        };
-      const ipSaveTo = params.existingProjectUuid
+      const importProps = (params.props as unknown) ?? {
+        importOption: 'ImportDocumentExtractLibraries',
+        associateFootprint: true,
+        associate3DModel: true,
+      };
+      const importSaveTo = params.existingProjectUuid
         ? { operation: 'Existing Project', existingProjectUuid: params.existingProjectUuid }
         : ((params.saveTo as unknown) ?? undefined);
-      return callFirst(
-        ['SYS_FileManager.importProjectByProjectFile', 'sys_FileManager.importProjectByProjectFile'],
-        ipFile,
+      return localCallFirst(
+        ['SYS_FileManager.importProjectByProjectFile'],
+        importFile,
         params.fileType ?? 'KiCad',
-        ipProps,
-        ipSaveTo,
+        importProps,
+        importSaveTo,
       );
     }
     case 'pcb.importSesRoute': {
       // PCB_Document.importAutoRouteSesFile(File) — applies Freerouting SES routing
       // onto the OPEN board (which must already have components + nets + outline).
-      const seFile = await callFirst(
-        ['SYS_FileSystem.readFileFromFileSystem', 'sys_FileSystem.readFileFromFileSystem'],
+      const sesFile = await localCallFirst(
+        ['SYS_FileSystem.readFileFromFileSystem'],
         params.filePath,
       );
-      if (!seFile) {
+      if (!sesFile) {
         throw newBridgeError(
           'FILE_NOT_READ',
           `Could not read SES file: ${String(params.filePath)}`,
           'Path must be absolute + exist; desktop-client only.',
         );
       }
-      return callFirst(
-        ['PCB_Document.importAutoRouteSesFile', 'pcb_Document.importAutoRouteSesFile'],
-        seFile,
-      );
+      return localCallFirst(['PCB_Document.importAutoRouteSesFile'], sesFile);
     }
-    case 'pcb.deleteComponent':
-      return callFirst(
-        ['PCB_PrimitiveComponent.delete', 'pcb_PrimitiveComponent.delete'],
-        params.primitiveIds,
-      );
-    case 'pcb.modifyComponent':
-      return callFirst(
-        ['PCB_PrimitiveComponent.modify', 'pcb_PrimitiveComponent.modify'],
-        params.primitiveId,
-        params.property,
-      );
     default:
       throw newBridgeError(
         'METHOD_NOT_ALLOWED',
-        `Unsupported bridge method: ${method}`,
-        'Update the extension dispatcher or call a supported method.',
+        `Unsupported local bridge method: ${method}`,
+        'Update the extension loader or call a supported method.',
       );
   }
 }
+
+async function handleLocalExtensionMethod(
+  method: string,
+  params: Record<string, unknown>,
+): Promise<{ handled: boolean; result?: unknown }> {
+  if (!LOCAL_EXTENSION_METHOD_SET.has(method)) return { handled: false };
+  return { handled: true, result: await dispatchLocalExtensionMethod(method, params) };
+}
+
+
+// ── Hot-swap machinery (dev builds only) ─────────────────────────────────────
+// The MCP server (with BRIDGE_HOT_SWAP_ENABLED=true) pushes a freshly built
+// dispatcher bundle as system.hotSwap.begin/chunk/commit; commit verifies the
+// sha256, evals the bundle via AsyncFunction (same mechanism as api.execute),
+// and atomically swaps the active dispatcher. These methods are handled here
+// in the loader — BEFORE the dispatcher — so a broken pushed dispatcher can
+// always be replaced or reverted.
+
+const HOTSWAP_COMPILED = typeof __MCP_DEV_HOTSWAP__ !== 'undefined' && __MCP_DEV_HOTSWAP__ === true;
+
+interface HotSwapBuffer {
+  chunks: Array<string | undefined>;
+  totalChunks: number;
+  byteLength: number;
+  sha256: string;
+  buildId: string;
+  received: number;
+  bytes: number;
+}
+
+let hotSwapBuffer: HotSwapBuffer | null = null;
+// Same algorithm as the server's computeMethodRegistryHash: sha256 of the
+// sorted method list joined by ',', hex, first 16 chars. Sent in the
+// handshake so a stale dispatcher fails loudly server-side.
+let activeMethodListHash = '';
+
+async function sha256Hex(text: string): Promise<string> {
+  const subtle = typeof crypto !== 'undefined' ? crypto.subtle : undefined;
+  if (!subtle) {
+    throw newLoaderError(
+      'EASYEDA_API_ERROR',
+      'crypto.subtle is not available in this runtime',
+      'Hot swap and method-list hashing require a secure context.',
+    );
+  }
+  const digest = await subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function newLoaderError(code: string, message: string, suggestion: string): Error {
+  const error = new Error(message);
+  Object.assign(error, { code, suggestion });
+  return error;
+}
+
+function compareCodeUnits(a: string, b: string): number {
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
+async function refreshMethodListHash(): Promise<void> {
+  try {
+    // Locale-independent ordering: must produce byte-identical input to the
+    // server's computeMethodRegistryHash (do NOT use localeCompare here).
+    const sorted = [...activeDispatcher.methodList, ...LOCAL_EXTENSION_METHODS].sort(
+      compareCodeUnits,
+    );
+    activeMethodListHash = (await sha256Hex(sorted.join(','))).slice(0, 16);
+  } catch (error) {
+    log('failed to compute method list hash', String(error));
+    activeMethodListHash = '';
+  }
+}
+
+function loaderStatus(): Record<string, unknown> {
+  return {
+    loaderVersion: EXTENSION_INFO.extensionVersion,
+    bridgeVersion: BRIDGE_VERSION,
+    activeDispatcher: activeDispatcher === bakedDispatcher ? 'baked' : 'pushed',
+    buildId: activeDispatcher.buildId,
+    bakedBuildId: bakedDispatcher.buildId,
+    methodCount: activeDispatcher.methodList.length + LOCAL_EXTENSION_METHODS.length,
+    methodListHash: activeMethodListHash,
+    hotSwapCompiled: HOTSWAP_COMPILED,
+    hotSwapEnabled: HOTSWAP_COMPILED && serverHotSwapEnabled,
+  };
+}
+
+function assertHotSwapAllowed(): void {
+  if (!HOTSWAP_COMPILED) {
+    throw newLoaderError(
+      'DEV_MODE_REQUIRED',
+      'This extension build does not include hot-swap support.',
+      'Import a dev build of the extension (scripts/build.mjs with MCP_DEV_HOTSWAP=true).',
+    );
+  }
+  if (!serverHotSwapEnabled) {
+    throw newLoaderError(
+      'DEV_MODE_REQUIRED',
+      'The connected MCP server has not enabled hot swap.',
+      'Start the server with BRIDGE_HOT_SWAP_ENABLED=true (non-production only).',
+    );
+  }
+}
+
+async function commitHotSwap(): Promise<unknown> {
+  const buffer = hotSwapBuffer;
+  hotSwapBuffer = null;
+  if (!buffer) {
+    throw newLoaderError(
+      'INVALID_PARAMS',
+      'No hot-swap transfer in progress',
+      'Send system.hotSwap.begin and all chunks before commit.',
+    );
+  }
+  if (buffer.received !== buffer.totalChunks) {
+    throw newLoaderError(
+      'INVALID_PARAMS',
+      `Hot-swap transfer incomplete: ${buffer.received}/${buffer.totalChunks} chunks received`,
+      'Resend the bundle from system.hotSwap.begin.',
+    );
+  }
+  const source = buffer.chunks.join('');
+  const actualByteLength = new TextEncoder().encode(source).byteLength;
+  if (actualByteLength !== buffer.byteLength) {
+    throw newLoaderError(
+      'INVALID_PARAMS',
+      `Hot-swap bundle size mismatch: expected ${buffer.byteLength} bytes, got ${actualByteLength}`,
+      'Resend the bundle from system.hotSwap.begin.',
+    );
+  }
+  const actualSha = await sha256Hex(source);
+  if (actualSha !== buffer.sha256) {
+    throw newLoaderError(
+      'UNAUTHORIZED',
+      'Hot-swap bundle sha256 verification failed',
+      'Resend the bundle from system.hotSwap.begin.',
+    );
+  }
+
+  const globalScope = globalThis as { __mcpDispatcherFactory?: unknown };
+  delete globalScope.__mcpDispatcherFactory;
+  const AsyncFunction = Object.getPrototypeOf(async function () {})
+    .constructor as FunctionConstructor;
+  try {
+    // eslint-disable-next-line no-restricted-syntax -- the checksum-verified hot-swap path is development-only and regression-tested.
+    const run = new AsyncFunction(source) as () => Promise<void>;
+    await run();
+  } catch (error) {
+    delete globalScope.__mcpDispatcherFactory;
+    throw newLoaderError(
+      'EASYEDA_API_ERROR',
+      `Hot-swap bundle failed to evaluate: ${String(error)}`,
+      'The previous dispatcher remains active. Fix the bundle and push again.',
+    );
+  }
+  const factory = globalScope.__mcpDispatcherFactory;
+  delete globalScope.__mcpDispatcherFactory;
+  if (typeof factory !== 'function') {
+    throw newLoaderError(
+      'EASYEDA_API_ERROR',
+      'Hot-swap bundle did not register __mcpDispatcherFactory',
+      'Build the bundle from dispatcher-entry.ts (pnpm build in the extension package).',
+    );
+  }
+
+  const candidate = (factory as (toolkit: DispatcherToolkit) => Dispatcher)(dispatcherToolkit);
+  if (
+    !candidate ||
+    typeof candidate.dispatch !== 'function' ||
+    !Array.isArray(candidate.methodList) ||
+    typeof candidate.buildId !== 'string'
+  ) {
+    throw newLoaderError(
+      'EASYEDA_API_ERROR',
+      'Hot-swap factory returned an invalid dispatcher',
+      'The previous dispatcher remains active. Fix the bundle and push again.',
+    );
+  }
+
+  activeDispatcher = candidate;
+  await refreshMethodListHash();
+  log(`hot-swapped dispatcher to build ${candidate.buildId}`);
+  showToast(`MCP Bridge: dispatcher hot-swapped (${candidate.buildId})`);
+  return {
+    swapped: true,
+    buildId: candidate.buildId,
+    methodCount: candidate.methodList.length,
+    methodListHash: activeMethodListHash,
+  };
+}
+
+/**
+ * Loader-level methods, handled before the dispatcher so they keep working
+ * even when a pushed dispatcher is broken. Returns handled:false for every
+ * regular bridge method.
+ */
+async function handleLoaderMethod(
+  method: string,
+  params: Record<string, unknown>,
+): Promise<{ handled: boolean; result?: unknown }> {
+  switch (method) {
+    case 'system.loaderStatus':
+      return { handled: true, result: loaderStatus() };
+    case 'system.hotSwap.begin': {
+      assertHotSwapAllowed();
+      const totalChunks = Number(params.totalChunks);
+      const byteLength = Number(params.byteLength);
+      const sha256 = String(params.sha256 ?? '');
+      const buildId = String(params.buildId ?? '');
+      if (
+        !Number.isInteger(totalChunks) ||
+        totalChunks < 1 ||
+        totalChunks > 4096 ||
+        !Number.isInteger(byteLength) ||
+        byteLength < 1 ||
+        !/^[0-9a-f]{64}$/.test(sha256) ||
+        !buildId
+      ) {
+        throw newLoaderError(
+          'INVALID_PARAMS',
+          'system.hotSwap.begin requires totalChunks, byteLength, sha256 and buildId',
+          'Use the server-side pushDispatcher helper.',
+        );
+      }
+      hotSwapBuffer = {
+        chunks: new Array<string | undefined>(totalChunks),
+        totalChunks,
+        byteLength,
+        sha256,
+        buildId,
+        received: 0,
+        bytes: 0,
+      };
+      return { handled: true, result: { ready: true, buildId } };
+    }
+    case 'system.hotSwap.chunk': {
+      assertHotSwapAllowed();
+      const buffer = hotSwapBuffer;
+      const seq = Number(params.seq);
+      const data = typeof params.data === 'string' ? params.data : undefined;
+      if (!buffer) {
+        throw newLoaderError(
+          'INVALID_PARAMS',
+          'No hot-swap transfer in progress',
+          'Send system.hotSwap.begin first.',
+        );
+      }
+      if (!Number.isInteger(seq) || seq < 0 || seq >= buffer.totalChunks || data === undefined) {
+        throw newLoaderError(
+          'INVALID_PARAMS',
+          'system.hotSwap.chunk requires a valid seq and data',
+          'Use the server-side pushDispatcher helper.',
+        );
+      }
+      if (buffer.chunks[seq] === undefined) {
+        buffer.received += 1;
+        buffer.bytes += data.length;
+      } else {
+        buffer.bytes += data.length - (buffer.chunks[seq]?.length ?? 0);
+      }
+      // Defensive cap: never buffer more than 4x the announced size.
+      if (buffer.bytes > buffer.byteLength * 4) {
+        hotSwapBuffer = null;
+        throw newLoaderError(
+          'INVALID_PARAMS',
+          'Hot-swap transfer exceeded the announced byteLength budget',
+          'Resend the bundle from system.hotSwap.begin.',
+        );
+      }
+      buffer.chunks[seq] = data;
+      return {
+        handled: true,
+        result: { received: buffer.received, totalChunks: buffer.totalChunks },
+      };
+    }
+    case 'system.hotSwap.commit': {
+      assertHotSwapAllowed();
+      return { handled: true, result: await commitHotSwap() };
+    }
+    case 'system.hotSwap.revert': {
+      assertHotSwapAllowed();
+      hotSwapBuffer = null;
+      const wasPushed = activeDispatcher !== bakedDispatcher;
+      activeDispatcher = bakedDispatcher;
+      await refreshMethodListHash();
+      if (wasPushed) {
+        log('reverted to baked dispatcher');
+        showToast('MCP Bridge: reverted to baked dispatcher');
+      }
+      return {
+        handled: true,
+        result: { reverted: wasPushed, buildId: activeDispatcher.buildId },
+      };
+    }
+    default:
+      return { handled: false };
+  }
+}
+
+// ── Remote relay ─────────────────────────────────────────────────────────────
+
+let remoteRelayClient: RemoteRelayClient | null = null;
+
+function requestRemoteApproval(prompt: RemoteApprovalPrompt): Promise<RemoteApprovalDecision> {
+  const dialog = readPath<EasyedaDialogApi>(getGlobal(), 'sys_Dialog');
+  const expiresAtMs = Date.parse(prompt.expiresAt);
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+    return Promise.resolve('timeout');
+  }
+  const showConfirmationMessage = dialog?.showConfirmationMessage?.bind(dialog);
+  if (!showConfirmationMessage) {
+    log('Remote approval dialog unavailable', { toolName: prompt.toolName });
+    showToast('Remote approval dialog is unavailable; request rejected.');
+    return Promise.resolve('rejected');
+  }
+
+  return new Promise<RemoteApprovalDecision>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => finish('timeout'), Math.max(0, expiresAtMs - Date.now()));
+    function finish(decision: RemoteApprovalDecision): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(decision);
+    }
+
+    const project = prompt.activeProject?.projectName ?? 'current EasyEDA project';
+    const summary = [
+      prompt.actionSummary,
+      `Method: ${prompt.toolName}`,
+      `Risk: ${prompt.riskLevel}`,
+      `Project: ${project}`,
+      `Input hash: ${prompt.inputHash.slice(0, 12)}`,
+    ].join('\n');
+    try {
+      showConfirmationMessage(
+        summary,
+        'Remote MCP Approval',
+        'Approve',
+        'Reject',
+        (mainButtonClicked) => finish(mainButtonClicked ? 'approved' : 'rejected'),
+      );
+    } catch (error) {
+      log('Remote approval dialog failed', error);
+      finish('rejected');
+    }
+  });
+}
+
+function getRemoteRelayClient(): RemoteRelayClient {
+  remoteRelayClient ??= new RemoteRelayClient({
+    extensionVersion: EXTENSION_INFO.extensionVersion,
+    log,
+    showToast,
+    readActiveProject: readRemoteActiveProject,
+    executeToolRequest: (toolName, input) =>
+      dispatchViaActive(toolName, isRecord(input) ? input : {}),
+    requestApproval: requestRemoteApproval,
+    timers: runtimeTimers,
+    createWebSocket: (url) => {
+      const WebSocketCtor = (globalThis as { WebSocket?: typeof WebSocket }).WebSocket;
+      if (typeof WebSocketCtor !== 'function') {
+        throw new Error('WebSocket is unavailable in the EasyEDA extension runtime.');
+      }
+      return new WebSocketCtor(url);
+    },
+  });
+  return remoteRelayClient;
+}
+
+function readRemoteActiveProject():
+  | { projectName?: string; documentType: 'schematic' | 'pcb' | 'unknown'; url?: string }
+  | undefined {
+  const href = typeof location !== 'undefined' ? location.href : undefined;
+  const title = typeof document !== 'undefined' ? document.title : undefined;
+  const projectName = title && title.trim() ? title.trim() : undefined;
+  if (!href && !projectName) return undefined;
+  const lower = `${href ?? ''} ${projectName ?? ''}`.toLowerCase();
+  const documentType = lower.includes('pcb')
+    ? 'pcb'
+    : lower.includes('sch')
+      ? 'schematic'
+      : 'unknown';
+  return { projectName, documentType, url: href };
+}
+
+function connectRemoteRelayInternal(
+  mode: Exclude<RemoteRelayMode, 'disabled'> = 'hosted',
+  relayUrl?: string,
+  pairingCode?: string,
+): void {
+  getRemoteRelayClient().connect({ mode, relayUrl, pairingCode });
+}
+
+function disconnectRemoteRelayInternal(): void {
+  getRemoteRelayClient().disconnect('user_disabled');
+  showToast('Remote Relay disabled');
+}
+
+function showRemoteRelayStatusInternal(): void {
+  const status = getRemoteRelayClient().getStatus();
+  const project = status.activeProject?.projectName ?? 'no active project detected';
+  const retry =
+    status.nextReconnectDelayMs !== undefined
+      ? ` | retry: ${Math.ceil(status.nextReconnectDelayMs / 1000)}s`
+      : '';
+  const attempts =
+    status.reconnectAttempts && status.reconnectAttempts > 0
+      ? ` | attempts: ${status.reconnectAttempts}`
+      : '';
+  const error = status.lastError ? ` | last error: ${status.lastError}` : '';
+  showToast(
+    `Remote Relay: ${status.mode}/${status.state} | project: ${project}${attempts}${retry}${error}`,
+  );
+}
+
+// ── Socket lifecycle ─────────────────────────────────────────────────────────
 
 function createSocket(
   id: string,
@@ -2282,35 +1343,32 @@ function createSocket(
   onMessage: (data: string) => void,
   onClose: () => void,
   onError: (error: unknown) => void,
+  options: CreateSocketOptions = {},
 ): SocketHandle | null {
   const sysWs = getWsApi();
 
   // Try easyeda-register first (may throw if external interaction is denied).
-  // EasyEDA Pro v3.2.x can also create the socket but never call connectedCallFn,
-  // so fire the open hook through a guarded fallback timer as well.
-  if (sysWs?.register && sysWs.send) {
+  // Only the API's real connected callback may mark the socket open. Calling
+  // onOpen speculatively while WebSocket.readyState is CONNECTING makes send()
+  // throw and closes an otherwise healthy loopback connection.
+  if (!options.skipRegister && sysWs?.register && sysWs.send) {
+    let openFired = false;
+    const fireOpen = (): void => {
+      if (openFired) return;
+      openFired = true;
+      onOpen();
+    };
+
     try {
-      let openFired = false;
-      const fireOpen = (src: string): void => {
-        if (openFired) return;
-        openFired = true;
-        diagToast(`open via ${src}`);
-        onOpen();
-      };
       sysWs.register(
         id,
         url,
         (event) => onMessage(String(isRecord(event) && 'data' in event ? event.data : event)),
-        () => fireOpen('connectedCallFn'),
+        fireOpen,
       );
-      // FIX: in EasyEDA Pro v3 the connectedCallFn may never fire, so the handshake never
-      // gets sent. Trigger it via a fallback timer too (the official EasyEDA reference
-      // extension also does not rely on connectedCallFn as the send trigger).
-      setTimeout(() => fireOpen('fallback-timer'), EASYEDA_REGISTER_OPEN_FALLBACK_MS);
       return { type: 'easyeda-register', id };
     } catch (err) {
       showExternalInteractionHintOnce(err);
-      diagToast(`register threw: ${String(err)}`);
       log('register() threw, falling through', err);
     }
   }
@@ -2329,10 +1387,13 @@ function createSocket(
     }
   }
 
-  // Last resort: raw browser WebSocket (works outside extension sandbox)
-  if (typeof WebSocket !== 'undefined') {
+  // Last resort: raw browser WebSocket (works outside extension sandbox).
+  // Resolve via globalThis because some EasyEDA runtimes shadow the bare
+  // WebSocket identifier while preserving the constructor on the global.
+  const BrowserWebSocketCtor = (globalThis as { WebSocket?: typeof WebSocket }).WebSocket;
+  if (typeof BrowserWebSocketCtor === 'function') {
     try {
-      const socket = new WebSocket(url);
+      const socket = new BrowserWebSocketCtor(url);
       socket.onopen = onOpen;
       socket.onmessage = (event) => onMessage(String(event.data));
       socket.onclose = onClose;
@@ -2346,8 +1407,39 @@ function createSocket(
   return null;
 }
 
+let chunkIdCounter = 0;
+
 function send(data: JsonValue): void {
   const payload = JSON.stringify(data);
+
+  // A5: split payloads that would exceed the server's per-frame cap into
+  // chunk envelopes the server reassembles. An oversized single frame closes
+  // the whole connection (code 4009); chunking turns that into a normal send.
+  // Only used when the server's hello advertised chunk support.
+  if (serverSupportsChunking && payload.length > Math.floor(bridgeMaxPayloadSize / 2)) {
+    // JSON-escaping a payload slice can inflate it (quotes/backslashes), so
+    // budget a quarter of the frame cap per chunk to stay comfortably under.
+    const chunkSize = Math.max(16_384, Math.floor(bridgeMaxPayloadSize / 4));
+    const total = Math.ceil(payload.length / chunkSize);
+    const id = `chk_${Date.now()}_${++chunkIdCounter}`;
+    for (let seq = 0; seq < total; seq += 1) {
+      sendRaw(
+        JSON.stringify({
+          type: 'chunk',
+          id,
+          seq,
+          total,
+          data: payload.slice(seq * chunkSize, (seq + 1) * chunkSize),
+        }),
+      );
+    }
+    return;
+  }
+
+  sendRaw(payload);
+}
+
+function sendRaw(payload: string): void {
   const sysWs = getWsApi();
 
   if (socketHandle?.type === 'easyeda-register' && sysWs?.send) {
@@ -2355,14 +1447,8 @@ function send(data: JsonValue): void {
       sysWs.send(socketHandle.id ?? SOCKET_ID, payload);
       return;
     } catch (err) {
-      // A throw here means a POST-connect send failed (the socket died) — the
-      // handshake no longer uses this path, so this is a genuine link drop.
-      log('sysWs.send threw after connect — link dropped', err);
-      // Auto-recovery — log it, don't pop a toast (the reconnect is silent).
-      if (!manualDisconnectRequested) {
-        logPanel('MCP Bridge: link dropped — auto-reconnecting');
-      }
-      closeSocket();
+      log('sysWs.send threw exception', err);
+      recoverConnection('Bridge send failed; reconnecting');
     }
     return;
   }
@@ -2371,6 +1457,7 @@ function send(data: JsonValue): void {
     socketHandle?.raw?.send?.(payload);
   } catch (err) {
     log('socket raw send threw exception', err);
+    recoverConnection('Bridge socket send failed; reconnecting');
   }
 }
 
@@ -2400,18 +1487,41 @@ function closeSocket(): void {
   socketHandle = null;
   connectedPort = null;
   connectionState = 'disconnected';
+  lastServerActivityMs = 0;
+}
+
+function recoverConnection(reason: string): void {
+  const wasConnected = connectionState === 'connected' && connectedPort !== null;
+  const wasConnecting = connectionState === 'connecting';
+  if (!wasConnected && !wasConnecting && !socketHandle) return;
+
+  log(reason);
   stopHeartbeat();
-  // EasyEDA's register() path gives us no onClose callback, so a mid-session
-  // drop is only discovered when a send throws. Schedule a reconnect here so the
-  // bridge self-heals instead of going silently dead. (No-op when the user asked
-  // to disconnect — manualDisconnectRequested is set before closeSocket() there,
-  // and scheduleReconnect() guards on it.)
-  if (!manualDisconnectRequested) {
+  closeHandle(socketHandle);
+  socketHandle = null;
+  connectedPort = null;
+  lastServerActivityMs = 0;
+
+  if (wasConnecting) {
+    // A failed handshake is one failed port attempt, not a disconnected session.
+    // Keep the scan state intact so connectToPort can time out and continue.
+    connectionState = 'connecting';
+    return;
+  }
+
+  connectionState = 'disconnected';
+  if (
+    shouldReconnectAfterSocketFailure({
+      wasConnected,
+      manualDisconnectRequested,
+      autoConnectEnabled,
+    })
+  ) {
     scheduleReconnect();
   }
 }
 
-function buildHandshake(): Record<string, unknown> {
+function sendHandshake(): void {
   const sessionToken =
     typeof BRIDGE_SESSION_TOKEN !== 'undefined' ? BRIDGE_SESSION_TOKEN : undefined;
   const handshake: Record<string, unknown> = {
@@ -2420,67 +1530,20 @@ function buildHandshake(): Record<string, unknown> {
     protocolVersion: BRIDGE_VERSION,
     contractVersion: BRIDGE_CONTRACT_VERSION,
     clientName: 'easyeda-mcp-pro',
-    extensionVersion: '0.7.3', // x-release-please-version
+    extensionVersion: EXTENSION_INFO.extensionVersion,
     easyedaVersion: getEasyedaVersion(),
     devMode: false,
+    loaderVersion: EXTENSION_INFO.extensionVersion,
   };
+  // Lets the server fail loudly when this extension serves stale dispatch
+  // logic. Computed asynchronously at startup/swap; omitted if not ready yet.
+  if (activeMethodListHash) {
+    handshake.methodListHash = activeMethodListHash;
+  }
   if (sessionToken) {
     handshake.sessionToken = sessionToken;
   }
-  return handshake;
-}
-
-// Attempt a single handshake send WITHOUT tearing down the socket on failure.
-// EasyEDA's sys_WebSocket.send throws "WebSocket 数据发送失败" when the underlying
-// socket is not yet OPEN — that is expected during the connect race and must NOT
-// trigger closeSocket(). (Calling closeSocket() here is exactly what made the
-// bridge flap: the fallback open-timer fired before the socket was writable, the
-// send threw, the socket was torn down, and the real open-event then no-opped.)
-function trySendHandshakeOnce(): boolean {
-  const payload = JSON.stringify(buildHandshake());
-  const sysWs = getWsApi();
-  if (socketHandle?.type === 'easyeda-register' && sysWs?.send) {
-    try {
-      sysWs.send(socketHandle.id ?? SOCKET_ID, payload);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  try {
-    socketHandle?.raw?.send?.(payload);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// Robust handshake: keep retrying the send until the socket accepts the bytes
-// (i.e. it is genuinely OPEN) or we pass the connect deadline. As soon as a send
-// succeeds we stop and wait for the server's `hello`, which flips us to
-// 'connected'. This is independent of connectedCallFn, whose timing is
-// unreliable on EasyEDA Pro v3 — we no longer depend on knowing exactly when the
-// socket opened.
-function sendHandshake(runId: number): void {
-  const deadline = Date.now() + CONNECT_TIMEOUT_MS;
-  let attempt = 0;
-  diagToast('sending handshake');
-  const attemptSend = (): void => {
-    if (runId !== connectRunId) return; // superseded by a newer connect attempt
-    if (connectionState === 'connected') return; // hello already received
-    if (!socketHandle) return; // socket torn down elsewhere (e.g. connect timeout)
-    attempt += 1;
-    if (trySendHandshakeOnce()) {
-      diagToast(`handshake delivered (attempt ${attempt})`);
-      return; // delivered — await hello
-    }
-    if (Date.now() < deadline) {
-      setTimeout(attemptSend, 250);
-    } else {
-      diagToast('handshake gave up — socket never became writable');
-    }
-  };
-  attemptSend();
+  send(handshake as JsonValue);
 }
 
 function getEasyedaVersion(): string | undefined {
@@ -2489,7 +1552,7 @@ function getEasyedaVersion(): string | undefined {
     try {
       return String(maybeVersion());
     } catch (error) {
-      logRecoverableError('failed to read EasyEDA version', error);
+      log('failed to read EasyEDA version', String(error));
       return undefined;
     }
   }
@@ -2498,44 +1561,52 @@ function getEasyedaVersion(): string | undefined {
 
 function startHeartbeat(): void {
   stopHeartbeat();
-  lastInboundMs = Date.now(); // seed: we just received the server's hello
-  heartbeatTimer = setInterval(() => {
-    if (connectedPort !== null) {
-      send({ type: 'heartbeat', timestamp: Date.now() });
+  lastServerActivityMs = Date.now();
+  heartbeatTimer = runtimeTimers.setInterval(() => {
+    if (connectedPort === null) return;
+    const nowMs = Date.now();
+    if (hasHeartbeatTimedOut(lastServerActivityMs, nowMs)) {
+      recoverConnection(`Bridge heartbeat timeout; silent for ${nowMs - lastServerActivityMs}ms`);
+      return;
     }
-  }, effectiveHeartbeatMs);
-  // Receive-side liveness watchdog. The register() socket path gives us no
-  // onclose callback, and background tabs throttle the heartbeat timer, so a
-  // dead/silent server (restart, dropped socket, missed beats) can otherwise
-  // leave us a "connected" zombie that never self-heals. If the server has sent
-  // nothing for LIVENESS_TIMEOUT_MS, tear the socket down — closeSocket() then
-  // schedules a fresh reconnect (port rescan + handshake).
-  watchdogTimer = setInterval(() => {
-    if (connectionState !== 'connected') return;
-    const silentMs = Date.now() - lastInboundMs;
-    if (silentMs > livenessTimeoutMs) {
-      // Auto-recovery — log it, don't pop a toast (the reconnect is silent).
-      logPanel(`MCP Bridge: server silent ${Math.round(silentMs / 1000)}s — reconnecting`);
-      closeSocket(); // → scheduleReconnect()
-    }
-  }, WATCHDOG_CHECK_MS);
+    send({ type: 'heartbeat', timestamp: nowMs, source: 'extension' });
+  }, HEARTBEAT_INTERVAL_MS);
 }
 
 function stopHeartbeat(): void {
   if (heartbeatTimer) {
-    clearInterval(heartbeatTimer);
+    runtimeTimers.clearInterval(heartbeatTimer);
     heartbeatTimer = null;
   }
-  if (watchdogTimer) {
-    clearInterval(watchdogTimer);
-    watchdogTimer = null;
-  }
+  lastServerActivityMs = 0;
+}
+
+function bridgeErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (isRecord(error) && typeof error.message === 'string') return error.message;
+  return String(error);
 }
 
 async function handleRequest(message: BridgeRequest): Promise<void> {
   const startedAt = Date.now();
   try {
-    const result = await dispatch(message.method, message.params);
+    // Loader-level methods (hot swap, loader status) are handled before the
+    // dispatcher so a broken pushed dispatcher can always be replaced.
+    const loaderResult = await handleLoaderMethod(message.method, message.params ?? {});
+    let result: unknown;
+    if (loaderResult.handled) {
+      result = loaderResult.result;
+    } else {
+      // Fork-only methods (editor/tab orchestration, native PCB authoring) are
+      // handled next, still before the dispatcher, so they survive a hot swap.
+      const localResult = await handleLocalExtensionMethod(
+        message.method,
+        message.params ?? {},
+      );
+      result = localResult.handled
+        ? localResult.result
+        : await activeDispatcher.dispatch(message.method, message.params);
+    }
     send({
       id: message.id,
       type: 'response',
@@ -2544,7 +1615,6 @@ async function handleRequest(message: BridgeRequest): Promise<void> {
       durationMs: Date.now() - startedAt,
     });
   } catch (error) {
-    dbg(`✖ ${message.method} failed: ${error instanceof Error ? error.message : String(error)}`);
     const record = isRecord(error) ? error : {};
     const response: BridgeResponse = {
       id: message.id,
@@ -2552,12 +1622,7 @@ async function handleRequest(message: BridgeRequest): Promise<void> {
       ok: false,
       error: {
         code: String(record.code ?? 'EASYEDA_API_ERROR'),
-        message:
-          error instanceof Error
-            ? error.message
-            : isRecord(error) && typeof error.message === 'string'
-              ? error.message
-              : String(error),
+        message: bridgeErrorMessage(error),
         suggestion: String(record.suggestion ?? 'Check EasyEDA Pro and extension logs.'),
         data: record.data,
       },
@@ -2567,213 +1632,314 @@ async function handleRequest(message: BridgeRequest): Promise<void> {
   }
 }
 
+function applyHelloPayload(record: Record<string, unknown>): void {
+  if (record.contractVersion !== BRIDGE_CONTRACT_VERSION) {
+    log('Bridge hello contract version mismatch', {
+      expected: BRIDGE_CONTRACT_VERSION,
+      actual: record.contractVersion,
+    });
+  }
+  const supportedVersions = Array.isArray(record.supportedProtocolVersions)
+    ? record.supportedProtocolVersions
+    : [];
+  if (!supportedVersions.includes(BRIDGE_VERSION)) {
+    log('Bridge hello does not include this extension protocol version', {
+      protocolVersion: BRIDGE_VERSION,
+      supportedProtocolVersions: supportedVersions,
+    });
+  }
+  if (typeof record.maxPayloadSize === 'number' && record.maxPayloadSize > 0) {
+    bridgeMaxPayloadSize = record.maxPayloadSize;
+  }
+  serverSupportsChunking = record.supportsChunking === true;
+  maxAggregatePayloadSize = bridgeMaxPayloadSize;
+  if (typeof record.maxAggregatePayloadSize === 'number' && record.maxAggregatePayloadSize > 0) {
+    maxAggregatePayloadSize = record.maxAggregatePayloadSize;
+  }
+  serverHotSwapEnabled = record.hotSwapEnabled === true;
+  log('Bridge handshake accepted');
+}
+
+function handleHeartbeatMessage(source: 'server' | 'extension' | undefined): void {
+  if (source === 'extension') return;
+  send({ type: 'heartbeat', timestamp: Date.now(), source: 'extension' });
+}
+
 function handleMessage(raw: string): InboundMessageType {
-  // Any bytes from the server prove the link is alive — reset the liveness clock
-  // first, even for a payload we can't parse (still evidence the server is there).
-  lastInboundMs = Date.now();
-  let message: { type?: string };
-  try {
-    message = JSON.parse(raw) as { type?: string };
-  } catch (error) {
-    log('bridge received non-JSON message; ignoring', { error: String(error) });
-    return 'ignored';
+  const message = JSON.parse(raw) as { type?: string; source?: 'server' | 'extension' };
+  if (isServerActivityMessage(message.type, message.source)) {
+    lastServerActivityMs = Date.now();
   }
-
-  if (message.type === 'hello') {
-    const record = message as Record<string, unknown>;
-    if (record.contractVersion !== BRIDGE_CONTRACT_VERSION) {
-      log('Bridge hello contract version mismatch', {
-        expected: BRIDGE_CONTRACT_VERSION,
-        actual: record.contractVersion,
-      });
-    }
-    const supportedVersions = Array.isArray(record.supportedProtocolVersions)
-      ? record.supportedProtocolVersions
-      : [];
-    if (!supportedVersions.includes(BRIDGE_VERSION)) {
-      log('Bridge hello does not include this extension protocol version', {
-        protocolVersion: BRIDGE_VERSION,
-        supportedProtocolVersions: supportedVersions,
-      });
-    }
-    // Adapt our beat + liveness window to the server's advertised cadence (1.1.0+)
-    // so a non-default BRIDGE_HEARTBEAT_MS neither zombie-drops us (beat too slow)
-    // nor false-flaps the watchdog (window too tight). Falls back to defaults for
-    // pre-1.1.0 servers that don't advertise. Runs before startHeartbeat().
-    const serverBeat = Number(record.heartbeatIntervalMs);
-    if (Number.isFinite(serverBeat) && serverBeat >= 1000 && serverBeat <= 60000) {
-      effectiveHeartbeatMs = Math.min(HEARTBEAT_MS, serverBeat);
-      livenessTimeoutMs = Math.max(LIVENESS_TIMEOUT_MS, Math.ceil(3.5 * serverBeat));
-    } else {
-      effectiveHeartbeatMs = HEARTBEAT_MS;
-      livenessTimeoutMs = LIVENESS_TIMEOUT_MS;
-    }
-    log('Bridge handshake accepted');
-    diagToast('HELLO received — connected!');
-    return 'hello';
+  switch (message.type) {
+    case 'hello':
+      applyHelloPayload(message as Record<string, unknown>);
+      return 'hello';
+    case 'heartbeat':
+      handleHeartbeatMessage(message.source);
+      return 'heartbeat';
+    case 'request':
+      void handleRequest(message as BridgeRequest);
+      return 'request';
+    default:
+      return 'ignored';
   }
-
-  if (message.type === 'heartbeat') {
-    send({ type: 'heartbeat', timestamp: Date.now() });
-    return 'heartbeat';
-  }
-
-  if (message.type === 'request') {
-    void handleRequest(message as BridgeRequest);
-    return 'request';
-  }
-
-  return 'ignored';
 }
 
 async function connectToPort(
   port: number,
   runId: number,
   showSuccessToast: boolean,
+  timeoutMs: number,
 ): Promise<boolean> {
-  const url = `ws://127.0.0.1:${port}`;
+  const url = `ws://${LOOPBACK_HOST}:${port}`;
   const socketId = `${SOCKET_ID}-${runId}-${port}`;
   return new Promise((resolve) => {
     let settled = false;
     let handle: SocketHandle | null = null;
+    let socketGeneration = 0;
+    let socketOpened = false;
+    let handshakeSent = false;
+    let registerFallbackTimer: RuntimeTimerHandle | null = null;
+
+    const clearRegisterFallback = (): void => {
+      if (!registerFallbackTimer) return;
+      runtimeTimers.clearTimeout(registerFallbackTimer);
+      registerFallbackTimer = null;
+    };
 
     const finish = (connected: boolean): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
+      clearRegisterFallback();
+      runtimeTimers.clearTimeout(timeout);
       resolve(connected);
     };
 
-    const timeout = setTimeout(() => {
+    const timeout = runtimeTimers.setTimeout(() => {
+      clearRegisterFallback();
+      if (handshakeSent) {
+        recordLocalConnectionDiagnostic({
+          phase: 'hello-timeout',
+          port,
+          transport: handle?.type,
+          message: `Socket opened on port ${port}, but the MCP bridge hello was not received.`,
+          priority: 90,
+        });
+      } else if (handle?.type !== 'easyeda-register') {
+        recordLocalConnectionDiagnostic({
+          phase: 'socket-open-timeout',
+          port,
+          transport: handle?.type,
+          message: `The ${handle?.type ?? 'WebSocket'} path did not open on port ${port}.`,
+          priority: 50,
+        });
+      }
       if (socketHandle === handle) {
         socketHandle = null;
       }
       closeHandle(handle);
       finish(false);
-    }, CONNECT_TIMEOUT_MS);
+    }, timeoutMs);
 
-    try {
-      handle = createSocket(
-        socketId,
-        url,
-        () => {
-          if (settled || runId !== connectRunId) {
-            closeHandle(handle);
-            return;
-          }
-          socketHandle = handle ?? { type: 'easyeda-register', id: socketId };
-          sendHandshake(runId);
-        },
-        (data) => {
-          try {
-            const messageType = handleMessage(data);
-            if (messageType === 'hello' && runId === connectRunId && !settled) {
-              socketHandle = handle ?? { type: 'easyeda-register', id: socketId };
-              connectedPort = port;
-              connectionState = 'connected';
-              reconnectAttempts = 0;
-              manualDisconnectRequested = false;
-              startHeartbeat();
-              if (showSuccessToast) {
-                showToast(`MCP Bridge connected: 127.0.0.1:${port}`);
-              }
-              finish(true);
+    const startSocket = (options: CreateSocketOptions = {}): SocketHandle | null => {
+      const generation = ++socketGeneration;
+      socketOpened = false;
+      handshakeSent = false;
+      let attemptHandle: SocketHandle | null = null;
+      const isCurrentGeneration = (): boolean =>
+        runId === connectRunId && generation === socketGeneration;
+      const resolvedHandle = (): SocketHandle =>
+        attemptHandle ?? { type: 'easyeda-register', id: socketId };
+
+      try {
+        attemptHandle = createSocket(
+          socketId,
+          url,
+          () => {
+            if (settled || !isCurrentGeneration()) {
+              closeHandle(attemptHandle);
+              return;
             }
-          } catch (error) {
-            log('Bridge message error', error);
-          }
-        },
-        () => {
-          const wasActiveConnection = socketHandle === handle && connectionState === 'connected';
-          if (socketHandle === handle) {
-            stopHeartbeat();
-            socketHandle = null;
-            connectedPort = null;
-            connectionState = 'disconnected';
-          }
-          if (!settled) {
+            socketOpened = true;
+            clearRegisterFallback();
+            socketHandle = resolvedHandle();
+            handshakeSent = true;
+            log('Local bridge socket opened; sending handshake', {
+              port,
+              transport: socketHandle.type,
+            });
+            sendHandshake();
+          },
+          (data) => {
+            if (!isCurrentGeneration()) return;
+            try {
+              const messageType = handleMessage(data);
+              if (messageType === 'hello' && !settled) {
+                socketHandle = resolvedHandle();
+                connectedPort = port;
+                connectionState = 'connected';
+                reconnectAttempts = 0;
+                manualDisconnectRequested = false;
+                lastLocalConnectionDiagnostic = null;
+                startHeartbeat();
+                if (showSuccessToast) {
+                  showToast(`MCP Bridge connected to local server`);
+                }
+                finish(true);
+              }
+            } catch (error) {
+              log('Bridge message error', error);
+            }
+          },
+          () => {
+            if (!isCurrentGeneration()) return;
+            clearRegisterFallback();
+            const currentHandle = resolvedHandle();
+            const wasActiveConnection =
+              socketHandle === currentHandle && connectionState === 'connected';
+            if (!settled) {
+              recordLocalConnectionDiagnostic({
+                phase: 'socket-closed',
+                port,
+                transport: currentHandle.type,
+                message: `The ${currentHandle.type} path closed before the bridge handshake completed on port ${port}.`,
+                priority: 60,
+              });
+            }
+            if (socketHandle === currentHandle) {
+              stopHeartbeat();
+              socketHandle = null;
+              connectedPort = null;
+              connectionState = 'disconnected';
+            }
+            if (!settled) {
+              finish(false);
+            }
+            if (wasActiveConnection && !manualDisconnectRequested && runId === connectRunId) {
+              scheduleReconnect();
+            }
+          },
+          (error) => {
+            if (!isCurrentGeneration()) return;
+            clearRegisterFallback();
+            const currentHandle = resolvedHandle();
+            recordLocalConnectionDiagnostic({
+              phase: 'socket-error',
+              port,
+              transport: currentHandle.type,
+              message: `The ${currentHandle.type} path failed on port ${port}: ${bridgeErrorMessage(error)}`,
+              priority: 70,
+            });
+            if (socketHandle === currentHandle) {
+              socketHandle = null;
+            }
+            closeHandle(currentHandle);
+            finish(false);
+          },
+          options,
+        );
+      } catch (error) {
+        log('createSocket threw', error);
+        closeHandle(attemptHandle);
+        return null;
+      }
+
+      handle = attemptHandle;
+      if (!attemptHandle) {
+        recordLocalConnectionDiagnostic({
+          phase: 'socket-api-unavailable',
+          port,
+          message: `No usable EasyEDA or browser WebSocket API was available for port ${port}.`,
+          priority: 80,
+        });
+        return null;
+      }
+
+      if (!settled && attemptHandle.type === 'easyeda-register') {
+        const registerHandle = attemptHandle;
+        registerFallbackTimer = runtimeTimers.setTimeout(() => {
+          if (settled || !isCurrentGeneration() || socketOpened) return;
+          registerFallbackTimer = null;
+          recordLocalConnectionDiagnostic({
+            phase: 'register-open-timeout',
+            port,
+            transport: registerHandle.type,
+            message:
+              `SYS_WebSocket.register() accepted port ${port} but did not invoke its open callback; ` +
+              'the extension closed that handle and tried a safe alternate socket API.',
+            priority: 85,
+          });
+          closeHandle(registerHandle);
+          if (socketHandle === registerHandle) socketHandle = null;
+
+          const fallbackHandle = startSocket({ skipRegister: true });
+          if (!fallbackHandle) {
             finish(false);
           }
-          if (wasActiveConnection && !manualDisconnectRequested && runId === connectRunId) {
-            scheduleReconnect();
-          }
-        },
-        (error) => {
-          log(`Connection failed on port ${port}`, error);
-          if (socketHandle === handle) {
-            socketHandle = null;
-          }
-          closeHandle(handle);
-          finish(false);
-        },
-      );
-    } catch (error) {
-      log('createSocket threw', error);
-      closeHandle(handle);
-      finish(false);
-      return;
-    }
+        }, REGISTER_OPEN_CALLBACK_TIMEOUT_MS);
+      }
 
-    if (!handle) {
-      finish(false);
-    }
+      return attemptHandle;
+    };
+
+    handle = startSocket();
+    if (!handle) finish(false);
   });
 }
-
-async function connect(mode: ConnectMode = 'manual'): Promise<void> {
+async function connectInternal(mode: ConnectMode = 'manual'): Promise<void> {
   const manual = mode === 'manual';
 
   if (connectionState === 'connected' && connectedPort !== null) {
     if (manual) {
-      showToast(`MCP Bridge already connected: 127.0.0.1:${connectedPort}`);
+      showToast(`MCP Bridge already connected to local server`);
     }
     return;
   }
 
   if (connectionState === 'connecting' && activeConnectPromise) {
-    if (manual) {
-      showToast(`MCP Bridge is already connecting: 127.0.0.1:${PORT_SCAN_LABEL}`);
-    }
-    return activeConnectPromise;
+    if (!manual) return activeConnectPromise;
+
+    // A manual Connect request should not remain trapped behind an auto-connect
+    // scan that may currently be waiting on another port. Cancel the old run and
+    // immediately restart from the preferred/base port.
+    connectRunId += 1;
+    activeConnectPromise = null;
+    closeSocket();
   }
 
   if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
+    runtimeTimers.clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
 
   manualDisconnectRequested = false;
   connectionState = 'connecting';
+  lastLocalConnectionDiagnostic = null;
   const runId = ++connectRunId;
 
   if (manual) {
-    showToast(`MCP Bridge connecting: 127.0.0.1:${PORT_SCAN_LABEL}`);
+    showToast(`MCP Bridge connecting to local server`);
   }
 
   activeConnectPromise = (async () => {
     try {
-      for (let offset = 0; offset < PORT_SCAN_COUNT; offset += 1) {
+      for (const attempt of getLocalBridgeConnectionAttempts(preferredPort)) {
         if (runId !== connectRunId || manualDisconnectRequested) return;
-        // Always show success toast so user knows auto-connect worked
-        const connected = await connectToPort(BRIDGE_PORT + offset, runId, true);
-        if (connected) return;
+        // Always show success toast so the user knows auto-connect worked.
+        const connected = await connectToPort(attempt.port, runId, true, attempt.timeoutMs);
+        if (connected) {
+          preferredPort = attempt.port;
+          return;
+        }
       }
     } catch (error) {
       log('connect() threw unexpectedly', error);
     } finally {
-      // Reschedule whenever this scan ended without a live connection — not only
-      // from the 'connecting' state. A fallback (browser/create) socket that
-      // opens then closes mid-scan flips the shared state to 'disconnected', so a
-      // 'connecting'-only guard would leave the bridge idle with no pending retry.
-      // Cast defeats TS's stale flow-narrowing: connectionState is assigned
-      // 'connecting' at the top of connect(), but the async connectToPort
-      // callbacks can move it to 'connected'/'disconnected' before we get here.
-      const scanFailed = (connectionState as ConnectionState) !== 'connected';
-      if (runId === connectRunId && scanFailed && !manualDisconnectRequested) {
+      if (runId === connectRunId && connectionState === 'connecting') {
         connectionState = 'disconnected';
         socketHandle = null;
         connectedPort = null;
-        const message = `MCP Bridge offline: no server found on 127.0.0.1:${PORT_SCAN_LABEL}`;
+        const message = `MCP Bridge offline: no local server found${localConnectionDiagnosticSuffix()}`;
         if (manual) {
           showToast(message);
         } else {
@@ -2793,8 +1959,8 @@ async function connect(mode: ConnectMode = 'manual'): Promise<void> {
   return activeConnectPromise;
 }
 
-function disconnect(): void {
-  void updateMenuTitle();
+function disconnectInternal(notifyUser: boolean): void {
+  if (notifyUser) void updateMenuTitle();
   const wasDisconnected = connectionState === 'disconnected' && !socketHandle;
   const wasConnecting = connectionState === 'connecting';
 
@@ -2803,12 +1969,13 @@ function disconnect(): void {
   activeConnectPromise = null;
   reconnectAttempts = 0;
   if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
+    runtimeTimers.clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
   stopHeartbeat();
   closeSocket();
 
+  if (!notifyUser) return;
   if (wasDisconnected) {
     showToast('MCP Bridge already disconnected');
   } else if (wasConnecting) {
@@ -2818,16 +1985,21 @@ function disconnect(): void {
   }
 }
 
-function showStatus(): void {
+function disconnectCommandInternal(): void {
+  disconnectInternal(true);
+}
+
+function showStatusInternal(): void {
+  autoConnectEnabled = loadAutoConnectSetting();
   const autoLabel = autoConnectEnabled ? 'Auto-Connect: ON' : 'Auto-Connect: OFF';
 
   if (connectionState === 'connected' && connectedPort !== null) {
-    showToast(`MCP Bridge connected: 127.0.0.1:${connectedPort} | ${autoLabel}`);
+    showToast(`MCP Bridge connected to local server | ${autoLabel}`);
     return;
   }
 
   if (connectionState === 'connecting') {
-    showToast(`MCP Bridge connecting: 127.0.0.1:${PORT_SCAN_LABEL} | ${autoLabel}`);
+    showToast(`MCP Bridge connecting to local server | ${autoLabel}`);
     return;
   }
 
@@ -2839,21 +2011,19 @@ function showStatus(): void {
     return;
   }
 
-  showToast(`MCP Bridge disconnected | ${autoLabel} — click Connect to connect`);
+  showToast(
+    `MCP Bridge disconnected | ${autoLabel} — click Connect to connect${localConnectionDiagnosticSuffix()}`,
+  );
 }
 
 function scheduleReconnect(): void {
   if (manualDisconnectRequested || reconnectTimer) return;
-  // Never schedule a reconnect while already connected or a connect is in
-  // flight — a stray drop signal could otherwise spin up a parallel port scan
-  // that churns dead ports (and spams the log) alongside the live connection.
-  if (connectionState === 'connected' || activeConnectPromise) return;
   reconnectAttempts += 1;
-  const delay = Math.min(RECONNECT_BASE_MS * 2 ** (reconnectAttempts - 1), RECONNECT_MAX_MS);
-  reconnectTimer = setTimeout(() => {
+  const delay = reconnectDelayMs(reconnectAttempts);
+  reconnectTimer = runtimeTimers.setTimeout(() => {
     reconnectTimer = null;
     if (connectionState === 'disconnected') {
-      void connect('auto');
+      void connectInternal('auto');
     }
   }, delay);
 }
@@ -2875,28 +2045,20 @@ function loadAutoConnectSetting(): boolean {
   } catch (e) {
     log('sys_Storage.getExtensionUserConfig unavailable', e);
   }
-  try {
-    const val = localStorage.getItem(STORAGE_KEY);
-    if (val !== null) return val !== 'false';
-  } catch (e) {
-    log('localStorage read failed', e);
-  }
   return true;
 }
 
-function saveAutoConnectSetting(value: boolean): void {
+async function saveAutoConnectSetting(value: boolean): Promise<void> {
   try {
     const storage = getStorage();
     if (storage && typeof storage.setExtensionUserConfig === 'function') {
-      storage.setExtensionUserConfig('autoConnect', value);
+      const saved = await storage.setExtensionUserConfig('autoConnect', value);
+      if (saved === false) {
+        log('sys_Storage.setExtensionUserConfig returned false');
+      }
     }
   } catch (e) {
     log('sys_Storage.setExtensionUserConfig unavailable', e);
-  }
-  try {
-    localStorage.setItem(STORAGE_KEY, String(value));
-  } catch (e) {
-    log('localStorage write failed', e);
   }
 }
 
@@ -2906,39 +2068,166 @@ async function updateMenuTitle(): Promise<void> {
   log(`menu state: Auto-Connect=${autoConnectEnabled}`);
 }
 
-async function toggleAutoConnect(): Promise<void> {
-  autoConnectEnabled = !autoConnectEnabled;
-  saveAutoConnectSetting(autoConnectEnabled);
+async function setAutoConnectInternal(enabled: boolean): Promise<void> {
+  // EasyEDA may evaluate or invoke a menu callback more than once. Setting an
+  // explicit target state is idempotent; a duplicate Enable call remains ON.
+  autoConnectEnabled = enabled;
+  await saveAutoConnectSetting(enabled);
   await updateMenuTitle();
-  if (autoConnectEnabled) {
+  if (enabled) {
     manualDisconnectRequested = false;
     reconnectAttempts = 0;
     if (connectionState === 'disconnected') {
-      void connect('auto');
+      await connectInternal('auto');
     }
   } else {
     manualDisconnectRequested = true;
     if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
+      runtimeTimers.clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
   }
   showToast(
-    autoConnectEnabled
+    enabled
       ? 'Auto-Connect: ON — will reconnect automatically'
       : 'Auto-Connect: OFF — use Connect button to connect',
   );
 }
 
+async function enableAutoConnectInternal(): Promise<void> {
+  await setAutoConnectInternal(true);
+}
+
+async function disableAutoConnectInternal(): Promise<void> {
+  await setAutoConnectInternal(false);
+}
+
+async function toggleAutoConnectInternal(): Promise<void> {
+  await setAutoConnectInternal(!loadAutoConnectSetting());
+}
+
+let activationStarted = false;
+
 async function handleActivate(): Promise<void> {
-  logPanel('extension active — build 0.6.0 (PCB authoring: board outline + track/via/zone/pad/hole/silk/pour fixes with real EasyEDA class names + tscircuit KiCad import via SYS_FileManager)');
   autoConnectEnabled = loadAutoConnectSetting();
+  if (activationStarted) {
+    if (autoConnectEnabled && connectionState === 'disconnected' && !activeConnectPromise) {
+      void connectInternal('auto');
+    }
+    return;
+  }
+
+  activationStarted = true;
   if (autoConnectEnabled) {
-    showToast(`MCP Bridge: Auto-Connect ON — scanning 127.0.0.1:${PORT_SCAN_LABEL}`);
-    void connect('auto');
+    showToast(`MCP Bridge: Auto-Connect ON — scanning local server`);
+    void connectInternal('auto');
   } else {
     showToast('MCP Bridge: Auto-Connect OFF — click Connect to connect');
   }
+}
+
+async function activateInternal(_status?: 'onStartupFinished', _arg?: string): Promise<void> {
+  await handleActivate();
+}
+
+function deactivateInternal(): void {
+  activationStarted = false;
+  disconnectInternal(false);
+  remoteRelayClient?.disconnect('disconnected');
+  remoteRelayClient = null;
+  const globalScope = globalThis as any;
+  const existing = globalScope[PERSISTENT_RUNTIME_KEY] as PersistentRuntime | undefined;
+  if (existing?.deactivate === deactivateInternal) {
+    delete globalScope[PERSISTENT_RUNTIME_KEY];
+  }
+}
+
+interface PersistentRuntime {
+  activate: typeof activateInternal;
+  deactivate: typeof deactivateInternal;
+  connect: typeof connectInternal;
+  disconnect: typeof disconnectCommandInternal;
+  showStatus: typeof showStatusInternal;
+  enableAutoConnect: typeof enableAutoConnectInternal;
+  disableAutoConnect: typeof disableAutoConnectInternal;
+  toggleAutoConnect: typeof toggleAutoConnectInternal;
+  connectRemoteRelay: typeof connectRemoteRelayInternal;
+  disconnectRemoteRelay: typeof disconnectRemoteRelayInternal;
+  showRemoteRelayStatus: typeof showRemoteRelayStatusInternal;
+}
+
+const PERSISTENT_RUNTIME_KEY = '__easyedaMcpProBridgeRuntime_v8__';
+
+function getPersistentRuntime(): PersistentRuntime {
+  const globalScope = globalThis as any;
+  const existing = globalScope[PERSISTENT_RUNTIME_KEY] as PersistentRuntime | undefined;
+  if (existing) return existing;
+
+  const runtime: PersistentRuntime = {
+    activate: activateInternal,
+    deactivate: deactivateInternal,
+    connect: connectInternal,
+    disconnect: disconnectCommandInternal,
+    showStatus: showStatusInternal,
+    enableAutoConnect: enableAutoConnectInternal,
+    disableAutoConnect: disableAutoConnectInternal,
+    toggleAutoConnect: toggleAutoConnectInternal,
+    connectRemoteRelay: connectRemoteRelayInternal,
+    disconnectRemoteRelay: disconnectRemoteRelayInternal,
+    showRemoteRelayStatus: showRemoteRelayStatusInternal,
+  };
+  globalScope[PERSISTENT_RUNTIME_KEY] = runtime;
+  return runtime;
+}
+
+const persistentRuntime = getPersistentRuntime();
+
+export async function activate(status?: 'onStartupFinished', arg?: string): Promise<void> {
+  await persistentRuntime.activate(status, arg);
+}
+
+export function deactivate(): void {
+  persistentRuntime.deactivate();
+}
+
+export async function connect(mode: ConnectMode = 'manual'): Promise<void> {
+  await persistentRuntime.connect(mode);
+}
+
+export function disconnect(): void {
+  persistentRuntime.disconnect();
+}
+
+export function showStatus(): void {
+  persistentRuntime.showStatus();
+}
+
+export async function enableAutoConnect(): Promise<void> {
+  await persistentRuntime.enableAutoConnect();
+}
+
+export async function disableAutoConnect(): Promise<void> {
+  await persistentRuntime.disableAutoConnect();
+}
+
+export async function toggleAutoConnect(): Promise<void> {
+  await persistentRuntime.toggleAutoConnect();
+}
+
+export function connectRemoteRelay(
+  mode: Exclude<RemoteRelayMode, 'disabled'> = 'hosted',
+  relayUrl?: string,
+  pairingCode?: string,
+): void {
+  persistentRuntime.connectRemoteRelay(mode, relayUrl, pairingCode);
+}
+
+export function disconnectRemoteRelay(): void {
+  persistentRuntime.disconnectRemoteRelay();
+}
+
+export function showRemoteRelayStatus(): void {
+  persistentRuntime.showRemoteRelayStatus();
 }
 
 function expose(): void {
@@ -2947,21 +2236,35 @@ function expose(): void {
     api.connect = connect;
     api.disconnect = disconnect;
     api.showStatus = showStatus;
+    api.connectRemoteRelay = connectRemoteRelay;
+    api.disconnectRemoteRelay = disconnectRemoteRelay;
+    api.showRemoteRelayStatus = showRemoteRelayStatus;
+    api.enableAutoConnect = enableAutoConnect;
+    api.disableAutoConnect = disableAutoConnect;
     (api as any).toggleAutoConnect = toggleAutoConnect;
-    api.activate = handleActivate;
-    api.deactivate = disconnect;
+    api.activate = activate;
+    api.deactivate = deactivate;
   }
 
   const globalScope = globalThis as any;
   globalScope.connect = connect;
   globalScope.disconnect = disconnect;
   globalScope.showStatus = showStatus;
+  globalScope.connectRemoteRelay = connectRemoteRelay;
+  globalScope.disconnectRemoteRelay = disconnectRemoteRelay;
+  globalScope.showRemoteRelayStatus = showRemoteRelayStatus;
+  globalScope.enableAutoConnect = enableAutoConnect;
+  globalScope.disableAutoConnect = disableAutoConnect;
   globalScope.toggleAutoConnect = toggleAutoConnect;
+  globalScope.activate = activate;
+  globalScope.deactivate = deactivate;
 }
 
 expose();
 log('Extension script loaded');
+// Compute the method-list hash early so the first handshake can include it.
+void refreshMethodListHash();
 
-// Auto-connect on load (handleActivate is not called by the framework
-// when activationEvents is empty, so we trigger it explicitly).
-handleActivate();
+// EasyEDA appends activate('onStartupFinished') after evaluating this bundle.
+// The exported activate function above starts the connection only after the
+// extension runtime (including sys_Timer and sys_WebSocket) is ready.

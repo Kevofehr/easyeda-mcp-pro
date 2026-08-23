@@ -1,0 +1,503 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { RemoteRelayClient } from '../src/remote-client.js';
+import { createRuntimeTimers } from '../src/runtime-timers.js';
+
+const OPEN = 1;
+const CLOSED = 3;
+
+type Listener = (() => void) | ((event: { data: unknown }) => void);
+
+class FakeWebSocket {
+  static instances: FakeWebSocket[] = [];
+  static OPEN = OPEN;
+  static CLOSED = CLOSED;
+
+  readonly sent: string[] = [];
+  readyState = 0;
+  onopen: Listener | null = null;
+  onmessage: Listener | null = null;
+  onerror: Listener | null = null;
+  onclose: Listener | null = null;
+
+  constructor(readonly url: string) {
+    FakeWebSocket.instances.push(this);
+  }
+
+  open(): void {
+    this.readyState = OPEN;
+    this.onopen?.();
+  }
+
+  receive(payload: Record<string, unknown>): void {
+    this.onmessage?.({ data: JSON.stringify(payload) });
+  }
+
+  fail(): void {
+    this.onerror?.();
+  }
+
+  close(): void {
+    this.readyState = CLOSED;
+    this.onclose?.();
+  }
+
+  send(data: string): void {
+    this.sent.push(data);
+  }
+}
+
+type ExecuteToolRequest = (toolName: string, input: unknown) => Promise<unknown>;
+
+function makeClient(
+  requestApproval = vi.fn(async () => 'approved' as const),
+  executeToolRequest: ExecuteToolRequest | null = vi.fn(async () => ({ ok: true })),
+) {
+  const log = vi.fn();
+  const showToast = vi.fn();
+  const client = new RemoteRelayClient({
+    extensionVersion: '0.24.2',
+    log,
+    showToast,
+    readActiveProject: () => ({ projectName: 'Fixture', documentType: 'schematic' }),
+    executeToolRequest: executeToolRequest ?? undefined,
+    requestApproval,
+    timers: createRuntimeTimers(() => undefined, globalThis as any, 'remote-test'),
+    createWebSocket: (url) => new FakeWebSocket(url) as unknown as WebSocket,
+  });
+  return { client, log, showToast, executeToolRequest, requestApproval };
+}
+
+function relayMessage(type: string, extra: Record<string, unknown> = {}) {
+  return {
+    protocolVersion: '2026-07-remote-relay-v1',
+    messageId: `msg_${type}`,
+    timestamp: new Date().toISOString(),
+    type,
+    ...extra,
+  };
+}
+
+describe('RemoteRelayClient resilience', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    FakeWebSocket.instances = [];
+    vi.stubGlobal('WebSocket', FakeWebSocket);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('schedules and performs reconnect after a transient close', async () => {
+    const { client } = makeClient();
+
+    client.connect({ mode: 'self_hosted', relayUrl: 'wss://relay.example/session' });
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    FakeWebSocket.instances[0].open();
+
+    FakeWebSocket.instances[0].close();
+
+    expect(client.getStatus()).toMatchObject({
+      state: 'connecting',
+      reconnectAttempts: 1,
+      nextReconnectDelayMs: 1000,
+      lastError: 'Remote Relay disconnected',
+    });
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(FakeWebSocket.instances[1].url).toBe('wss://relay.example/session');
+  });
+
+  it('does not reconnect after explicit user disconnect', async () => {
+    const { client } = makeClient();
+
+    client.connect({ mode: 'hosted', relayUrl: 'wss://relay.example/session' });
+    FakeWebSocket.instances[0].open();
+    client.disconnect('user_disabled');
+
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(client.getStatus()).toMatchObject({ state: 'disconnected', sessionId: undefined });
+  });
+
+  it('uses Web Crypto bytes for message ids when randomUUID is unavailable', () => {
+    const getRandomValues = vi.fn((values: Uint8Array) => {
+      values.fill(0xab);
+      return values;
+    });
+    vi.stubGlobal('crypto', { getRandomValues });
+    const mathRandom = vi.spyOn(Math, 'random').mockImplementation(() => {
+      throw new Error('Math.random must not be used for relay message ids');
+    });
+    const { client } = makeClient();
+
+    client.connect({ mode: 'hosted', relayUrl: 'wss://relay.example/session' });
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+
+    const registration = JSON.parse(socket.sent[0]) as { messageId: string; type: string };
+    expect(registration.type).toBe('register_session');
+    expect(registration.messageId).toBe(`msg_${'ab'.repeat(16)}`);
+    expect(getRandomValues).toHaveBeenCalledTimes(1);
+    expect(mathRandom).not.toHaveBeenCalled();
+  });
+
+  it('keeps message ids unique without Web Crypto and never falls back to Math.random', () => {
+    vi.stubGlobal('crypto', undefined);
+    const mathRandom = vi.spyOn(Math, 'random').mockImplementation(() => {
+      throw new Error('Math.random must not be used for relay message ids');
+    });
+    vi.setSystemTime(new Date('2026-08-22T00:00:00.000Z'));
+    const { client } = makeClient();
+
+    client.connect({ mode: 'hosted', relayUrl: 'wss://relay.example/session' });
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    socket.receive(relayMessage('heartbeat'));
+
+    const [registration, heartbeat] = socket.sent.map(
+      (payload) => JSON.parse(payload) as { messageId: string; type: string },
+    );
+    expect(registration.type).toBe('register_session');
+    expect(heartbeat.type).toBe('heartbeat');
+    expect(registration.messageId).toMatch(/^msg_[0-9a-f]+_[0-9a-f]+$/);
+    expect(heartbeat.messageId).toMatch(/^msg_[0-9a-f]+_[0-9a-f]+$/);
+    expect(heartbeat.messageId).not.toBe(registration.messageId);
+    expect(mathRandom).not.toHaveBeenCalled();
+  });
+
+  it('updates heartbeat liveness and echoes heartbeat messages', () => {
+    const { client } = makeClient();
+
+    client.connect({ mode: 'hosted', relayUrl: 'wss://relay.example/session' });
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    socket.receive(relayMessage('heartbeat'));
+
+    expect(client.getStatus().lastHeartbeatAt).toBeDefined();
+    const sentTypes = socket.sent.map((data) => JSON.parse(data).type);
+    expect(sentTypes).toContain('register_session');
+    expect(sentTypes).toContain('heartbeat');
+  });
+
+  it('closes stale heartbeat sockets so the normal close path reconnects', async () => {
+    const { client, log } = makeClient();
+
+    client.connect({ mode: 'hosted', relayUrl: 'wss://relay.example/session' });
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+
+    await vi.advanceTimersByTimeAsync(60_001);
+
+    expect(socket.readyState).toBe(CLOSED);
+    expect(client.getStatus()).toMatchObject({
+      state: 'connecting',
+      reconnectAttempts: 1,
+      nextReconnectDelayMs: 1000,
+    });
+    expect(log).toHaveBeenCalledWith('Remote Relay heartbeat stale; closing socket to reconnect');
+  });
+
+  it('records the paired session id from the relay registration response', () => {
+    const { client } = makeClient();
+
+    client.connect({
+      mode: 'hosted',
+      relayUrl: 'wss://relay.example/session',
+      pairingCode: '123456',
+    });
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    socket.receive(relayMessage('session_registered', { paired: true, sessionId: 'sess_1' }));
+
+    expect(client.getStatus()).toMatchObject({
+      state: 'paired',
+      sessionId: 'sess_1',
+      pairingCode: '123456',
+    });
+  });
+
+  it('returns the explicit user approval decision to the relay', async () => {
+    const { client, requestApproval } = makeClient();
+    client.connect({ mode: 'hosted', relayUrl: 'wss://relay.example/session' });
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+
+    socket.receive(
+      relayMessage('approval_request', {
+        approvalId: 'appr_1',
+        toolName: 'schematic.addText',
+        riskLevel: 'write',
+        actionSummary: 'Add a schematic note',
+        inputHash: '1234567890abcdef',
+        activeProject: { projectName: 'Fixture', documentType: 'schematic' },
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(requestApproval).toHaveBeenCalledWith({
+      approvalId: 'appr_1',
+      toolName: 'schematic.addText',
+      riskLevel: 'write',
+      actionSummary: 'Add a schematic note',
+      inputHash: '1234567890abcdef',
+      activeProject: { projectName: 'Fixture', documentType: 'schematic' },
+      expiresAt: expect.any(String),
+    });
+    const approvalResult = socket.sent
+      .map((data) => JSON.parse(data) as Record<string, unknown>)
+      .find((message) => message.type === 'approval_result');
+    expect(approvalResult).toMatchObject({
+      type: 'approval_result',
+      approvalId: 'appr_1',
+      result: 'approved',
+    });
+  });
+
+  it('does not open duplicate approval prompts for the same approval id', async () => {
+    let resolveDecision: ((decision: 'rejected') => void) | undefined;
+    const requestApproval = vi.fn(
+      async () =>
+        await new Promise<'rejected'>((resolve) => {
+          resolveDecision = resolve;
+        }),
+    );
+    const { client } = makeClient(requestApproval);
+    client.connect({ mode: 'hosted', relayUrl: 'wss://relay.example/session' });
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    const request = relayMessage('approval_request', {
+      approvalId: 'appr_duplicate',
+      toolName: 'schematic.addText',
+      riskLevel: 'write',
+      actionSummary: 'Add a schematic note',
+      inputHash: 'hash',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    socket.receive(request);
+    socket.receive(request);
+    expect(requestApproval).toHaveBeenCalledTimes(1);
+
+    resolveDecision?.('rejected');
+    await Promise.resolve();
+    await Promise.resolve();
+    const decisions = socket.sent
+      .map((data) => JSON.parse(data) as Record<string, unknown>)
+      .filter((message) => message.type === 'approval_result');
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({ approvalId: 'appr_duplicate', result: 'rejected' });
+  });
+});
+
+describe('RemoteRelayClient approval session binding', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    FakeWebSocket.instances = [];
+    vi.stubGlobal('WebSocket', FakeWebSocket);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('ignores malformed approval requests without prompting or replying', async () => {
+    const { client, requestApproval } = makeClient();
+    client.connect({ mode: 'hosted', relayUrl: 'wss://relay.example/session' });
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+
+    socket.receive(
+      relayMessage('approval_request', {
+        approvalId: '',
+        toolName: '',
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
+    await Promise.resolve();
+
+    expect(requestApproval).not.toHaveBeenCalled();
+    expect(
+      socket.sent
+        .map((data) => JSON.parse(data))
+        .filter((message) => message.type === 'approval_result'),
+    ).toHaveLength(0);
+  });
+
+  it('does not deliver a pending approval result on a replacement socket', async () => {
+    let resolveDecision: ((decision: 'approved') => void) | undefined;
+    const requestApproval = vi.fn(
+      async () =>
+        await new Promise<'approved'>((resolve) => {
+          resolveDecision = resolve;
+        }),
+    );
+    const { client } = makeClient(requestApproval);
+    client.connect({ mode: 'hosted', relayUrl: 'wss://relay.example/session' });
+    const originalSocket = FakeWebSocket.instances[0];
+    originalSocket.open();
+    originalSocket.receive(
+      relayMessage('approval_request', {
+        approvalId: 'appr_stale',
+        toolName: 'schematic.addText',
+        riskLevel: 'write',
+        actionSummary: 'Add a schematic note',
+        inputHash: 'hash',
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
+    expect(requestApproval).toHaveBeenCalledTimes(1);
+
+    originalSocket.close();
+    await vi.advanceTimersByTimeAsync(1_000);
+    const replacementSocket = FakeWebSocket.instances[1];
+    replacementSocket.open();
+
+    resolveDecision?.('approved');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const approvalResults = [...originalSocket.sent, ...replacementSocket.sent]
+      .map((data) => JSON.parse(data) as Record<string, unknown>)
+      .filter((message) => message.type === 'approval_result');
+    expect(approvalResults).toHaveLength(0);
+  });
+
+  it('returns a structured error when a tool request omits its name', async () => {
+    const { client } = makeClient();
+    client.connect({ mode: 'hosted', relayUrl: 'wss://relay.example/session' });
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+
+    socket.receive(relayMessage('tool_request', { input: {} }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const response = socket.sent
+      .map((data) => JSON.parse(data) as Record<string, unknown>)
+      .find((message) => message.type === 'tool_response');
+    expect(response).toMatchObject({
+      type: 'tool_response',
+      ok: false,
+      error: { code: 'REMOTE_TOOL_NAME_MISSING' },
+    });
+  });
+
+  it('returns a structured error when Remote Relay execution is disabled', async () => {
+    const { client } = makeClient(undefined, null);
+    client.connect({ mode: 'hosted', relayUrl: 'wss://relay.example/session' });
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+
+    socket.receive(
+      relayMessage('tool_request', {
+        toolName: 'schematic.listComponents',
+        input: {},
+      }),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const response = socket.sent
+      .map((data) => JSON.parse(data) as Record<string, unknown>)
+      .find((message) => message.type === 'tool_response');
+    expect(response).toMatchObject({
+      type: 'tool_response',
+      ok: false,
+      error: { code: 'REMOTE_EXECUTION_NOT_ENABLED' },
+    });
+  });
+
+  it('serializes execution failures on the originating active socket', async () => {
+    const executeToolRequest = vi.fn(async () => {
+      throw Object.assign(new Error('fixture execution failed'), { code: 'FIXTURE_FAILURE' });
+    });
+    const { client } = makeClient(undefined, executeToolRequest);
+    client.connect({ mode: 'hosted', relayUrl: 'wss://relay.example/session' });
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+
+    socket.receive(
+      relayMessage('tool_request', {
+        toolName: 'schematic.listComponents',
+        input: {},
+      }),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const response = socket.sent
+      .map((data) => JSON.parse(data) as Record<string, unknown>)
+      .find((message) => message.type === 'tool_response');
+    expect(response).toMatchObject({
+      type: 'tool_response',
+      ok: false,
+      error: { code: 'FIXTURE_FAILURE', message: 'fixture execution failed' },
+    });
+  });
+
+  it('does not deliver a pending tool response on a replacement socket', async () => {
+    let resolveResult: ((result: { ok: true }) => void) | undefined;
+    const executeToolRequest = vi.fn(
+      async () =>
+        await new Promise<{ ok: true }>((resolve) => {
+          resolveResult = resolve;
+        }),
+    );
+    const { client } = makeClient(
+      vi.fn(async () => 'approved' as const),
+      executeToolRequest,
+    );
+    client.connect({ mode: 'hosted', relayUrl: 'wss://relay.example/session' });
+    const originalSocket = FakeWebSocket.instances[0];
+    originalSocket.open();
+    originalSocket.receive(
+      relayMessage('tool_request', {
+        toolName: 'schematic.listComponents',
+        input: {},
+      }),
+    );
+    await Promise.resolve();
+    expect(executeToolRequest).toHaveBeenCalledTimes(1);
+
+    originalSocket.close();
+    await vi.advanceTimersByTimeAsync(1_000);
+    const replacementSocket = FakeWebSocket.instances[1];
+    replacementSocket.open();
+
+    resolveResult?.({ ok: true });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const responses = [...originalSocket.sent, ...replacementSocket.sent]
+      .map((data) => JSON.parse(data) as Record<string, unknown>)
+      .filter((message) => message.type === 'tool_response');
+    expect(responses).toHaveLength(0);
+  });
+
+  it('ignores approval messages received from a disconnected socket', async () => {
+    const { client, requestApproval } = makeClient();
+    client.connect({ mode: 'hosted', relayUrl: 'wss://relay.example/session' });
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    client.disconnect('user_disabled');
+
+    socket.receive(
+      relayMessage('approval_request', {
+        approvalId: 'appr_disconnected',
+        toolName: 'schematic.addText',
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
+    await Promise.resolve();
+
+    expect(requestApproval).not.toHaveBeenCalled();
+  });
+});

@@ -2,15 +2,6 @@
 
 ## Unreleased (fork: Kevofehr/easyeda-mcp-pro)
 
-### Bug Fixes
-
-- Server crash on startup (`-32000 Connection closed`) at profiles that register a
-  write tool with a refined input schema (e.g. `easyeda_pcb_add_solid_region`'s
-  `.superRefine`). Under zod v4, `registeredInputSchema()` overwrote the
-  `confirmWrite` key via `ZodObject.extend()`, which throws on refined schemas.
-  Use `.safeExtend()` when available (preserves the refinement); falls back to
-  `.extend()` on older zod. Added a regression test.
-
 ### Features
 
 - Headless multi-tab orchestration (single agent, full tab access). New editor
@@ -30,6 +21,517 @@
   and per-section placeholders let it improve every project.
 
 Multi-instance parallelism is intentionally out of scope for now.
+
+## [1.0.0-rc.6] - 2026-08-22
+
+### Release candidate
+
+- Supersedes RC.5 because EasyEDA extension runtime security hardening landed after the RC.5 candidate was published; the required seven-day major-release soak restarts only after RC.6 is published and its exact artifacts are verified.
+- Hardens Remote Relay message identifiers to prefer `crypto.randomUUID()`, use `crypto.getRandomValues()` as the cryptographic fallback, and avoid treating `Math.random()` as a security primitive; E2E diagnostics now escape and bound untrusted control characters before terminal output (#536 / #537).
+- Removes avoidable PATH-based executable resolution from the E2E Node launcher and version-sync formatting path by using `process.execPath` and the installed Prettier API, while preserving cross-platform verification behavior (#536 / #537).
+- Removes the persistently broken optional Codecov Bundle Analysis remote upload while retaining blocking Codecov patch coverage, LCOV/Test Analytics uploads, deterministic extension byte budgets, and the full security/platform gate set (#534 / #535).
+- Reduces the legacy Sonar vulnerability backlog from 13 findings to 6; the remaining six are documented safe-by-context portability/timing cases, and RC.6 introduces no new Sonar issues or security hotspots.
+- Requires fresh EasyEDA Pro 3.2.149 live compatibility evidence for the RC.6 exact runtime tree before prerelease publication because extension runtime code changed after RC.5.
+- Uses EasyEDA numeric install version `0.99.6` while preserving `1.0.0-rc.6` as the server and extension runtime product version.
+- Leaves npm/GHCR `latest` and the stable MCP Registry entry on `0.35.4` until the restarted RC.6 soak and stable promotion gates complete.
+
+## [1.0.0-rc.5] - 2026-08-21
+
+### Release candidate
+
+- Supersedes RC.4 because P0 EasyEDA runtime corrections landed after the RC.4 candidate; the required seven-day major-release soak restarts only after RC.5 is published and its exact artifacts are verified.
+- Rejects empty or non-PDF bridge payloads before writing a `.pdf` artifact, so PDF export no longer reports success for an unusable file (#527 / #529).
+- Adds explicit `projectId + transactionId` participation for standalone schematic component placement and safely recreatable primitive deletion, with rollback-backed verification; unsupported transactional delete kinds and project mismatches fail closed before mutation while transaction-less writes retain their existing standalone behavior (#524 / #530).
+- Corrects the documented prerelease publication workflow reference to `.github/workflows/publish-release.yml`, keeping RC publication aligned with the protected release process (#523).
+- Requires fresh EasyEDA Pro 3.2.149 live evidence for transactional placement rollback, safe primitive delete rollback, unsupported-delete fail-closed behavior, standalone writes, and a successful non-empty `%PDF-` export before RC.5 publication.
+- Uses EasyEDA numeric install version `0.99.5` while preserving `1.0.0-rc.5` as the server and extension runtime product version.
+- Leaves npm/GHCR `latest` and the stable MCP Registry entry on `0.35.4` until the restarted RC.5 soak and stable promotion gates complete.
+
+## [1.0.0-rc.4] - 2026-08-17
+
+### Release candidate
+
+- Supersedes RC.3 because the MCP runtime/dependency migration in #516 landed after the RC.3 candidate and invalidated its seven-day major-release soak under the release policy.
+- Migrates the existing sessionful MCP runtime to the modular SDK v2 packages while deliberately preserving the current `2025-11-25` wire contract; advertised MCP input/output schemas now use the MCP-compatible JSON Schema 2020-12 dialect instead of the SDK-v1 draft-07 output that caused the Claude Code incompatibility tracked in #520, while MCP `2026-07-28` dual-era/stateless support remains deferred to #476.
+- Adds a real MCP `tools/list` regression gate over every enabled dev-profile tool so an incompatible explicit schema dialect cannot silently return.
+- Updates the reviewed transitive `nanoid` security pin to patched `3.3.18`, restoring the repository dependency audit without weakening supply-chain policy.
+- Adds regression evidence that the global HTTP rate limiter runs before OAuth authorization middleware, preserving fail-closed remote HTTP behavior.
+- Requires fresh EasyEDA Pro 3.2.149 compatibility evidence for the post-RC.3 transport/runtime surface and starts a new seven-day v1 soak only after RC.4 publication and exact published-asset verification.
+- Uses EasyEDA numeric install version `0.99.4` while preserving `1.0.0-rc.4` as the server and extension runtime product version.
+- Keeps copper-zone restoration, PCB side-aware work, and actual MCP `2026-07-28` compatibility outside the RC.4 stabilization scope.
+
+## [1.0.0-rc.3] - 2026-08-11
+
+### Release candidate
+
+- Supersedes RC.2 because verified behavioral/runtime corrections landed after the RC.2 candidate; the required seven-day v1 soak restarts only after RC.3 publication verification.
+- Preserves DRC/ERC unavailability as indeterminate and reports the focused-document precondition explicitly for native PCB DRC and schematic ERC without switching the user’s active document.
+- Exposes native PCB Fill and Region primitives through typed read-only inspection while keeping Pour zones separate and adding no Fill/Region mutation capability.
+- Bounds canvas capture payloads with deterministic proportional downsampling so oversized PNG results stay below the client-result budget without cropping, while small captures remain unchanged.
+- Includes the nullable-inspection regression guards and the repository Mergify merge-protection integration that passed the protected quality/security gates.
+- Uses EasyEDA numeric install version `0.99.3` while preserving `1.0.0-rc.3` as the server and extension runtime product version.
+- Keeps copper-zone restoration, PCB side-aware view-orientation research, and MCP 2026-07-28 compatibility outside the RC.3 stabilization scope.
+
+## [1.0.0-rc.2] - 2026-08-09
+
+### Release candidate
+
+- Replaces RC.1 after candidate-sensitive security, packaging, export, and safety corrections landed on `main`; its seven-day v1 soak starts only after RC.2 publication verification.
+- Fails closed for the previously unverified PCB copper-zone creation path instead of issuing an incomplete native call.
+- Includes the dependency and production-image remediation, including the patched transitive `nanoid` resolution and production-only dependency enforcement.
+- Preserves primary CI failure causes by validating coverage reports before dependent Codecov uploads.
+- Validates PCB export identifiers before native Gerber and pick-and-place calls, backed by disposable EasyEDA Pro 3.2.149 live export evidence.
+- Supports the npm 12 object-shaped `npm pack --json` result while preserving deterministic package verification.
+- Uses EasyEDA numeric install version `0.99.2` while preserving `1.0.0-rc.2` as the server and extension runtime product version.
+- Keeps copper-zone restoration, PCB side-aware feature work, and MCP 2026-07-28 compatibility outside the RC.2 stabilization scope.
+
+## [1.0.0-rc.1] - 2026-07-29
+
+### Release candidate
+
+- Opens the required seven-day v1 soak without moving npm `latest`, GHCR `latest`, or the MCP Registry stable entry.
+- Carries the live-validated EasyEDA Pro 3.2.149 board-outline recovery and transactional `placeComponent` timeout reconciliation fixes.
+- Adds Linux, Windows, and macOS CI that installs the packed npm tarball and runs the installed CLI doctor.
+- Documents the opt-in upgrade, verification, and rollback path in `docs/MIGRATING_TO_V1.md`.
+- Uses EasyEDA numeric install version `0.99.1` while preserving `1.0.0-rc.1` as the server and extension runtime product version.
+- Keeps Remote Relay experimental and preserves the existing profile/tool compatibility contract.
+
+## [0.35.4](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.35.3...easyeda-mcp-pro-v0.35.4) (2026-07-25)
+
+
+### Bug Fixes
+
+* restore live smoke primitive inventory parsing ([#413](https://github.com/oaslananka/easyeda-mcp-pro/issues/413)) ([f424ec1](https://github.com/oaslananka/easyeda-mcp-pro/commit/f424ec18dbc42113e69ace64f23cd366dbe4c3be))
+* restore live smoke runtime helpers ([#414](https://github.com/oaslananka/easyeda-mcp-pro/issues/414)) ([b98f5fe](https://github.com/oaslananka/easyeda-mcp-pro/commit/b98f5fe9ca24a657317d90df3fcca164f950f842))
+* verify OIDC publication and live rollback evidence ([#411](https://github.com/oaslananka/easyeda-mcp-pro/issues/411)) ([a75f8dd](https://github.com/oaslananka/easyeda-mcp-pro/commit/a75f8dd4305e19d07b4760355309a5576b50449c))
+
+## [0.35.3](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.35.2...easyeda-mcp-pro-v0.35.3) (2026-07-24)
+
+
+### Bug Fixes
+
+* **deps:** patch brace-expansion advisory ([#405](https://github.com/oaslananka/easyeda-mcp-pro/issues/405)) ([05868e9](https://github.com/oaslananka/easyeda-mcp-pro/commit/05868e9f3cdfb9079b9ee1f512781137573ff937))
+* remediate 24 July 2026 repository audit findings ([#402](https://github.com/oaslananka/easyeda-mcp-pro/issues/402)) ([d38cf4a](https://github.com/oaslananka/easyeda-mcp-pro/commit/d38cf4ac8b815f124871df819fab886c7783a7de))
+
+## [0.35.2](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.35.1...easyeda-mcp-pro-v0.35.2) (2026-07-23)
+
+
+### Bug Fixes
+
+* **devex:** enforce supported automation runtime ([#359](https://github.com/oaslananka/easyeda-mcp-pro/issues/359)) ([581963c](https://github.com/oaslananka/easyeda-mcp-pro/commit/581963c506bfacc60223956383a240cb5de0e0aa))
+
+## [0.35.1](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.35.0...easyeda-mcp-pro-v0.35.1) (2026-07-22)
+
+
+### Bug Fixes
+
+* **deps:** remediate current dependency advisories ([#351](https://github.com/oaslananka/easyeda-mcp-pro/issues/351)) ([5eba1f9](https://github.com/oaslananka/easyeda-mcp-pro/commit/5eba1f9f5e573d8fad9eca83b58a6018868648fb))
+* **schematic:** honor native no-connect in floating-pin diagnostics ([#354](https://github.com/oaslananka/easyeda-mcp-pro/issues/354)) ([4d978a8](https://github.com/oaslananka/easyeda-mcp-pro/commit/4d978a8af6fb510d6816264b63246ba84667d3bc))
+
+## [0.35.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.34.4...easyeda-mcp-pro-v0.35.0) (2026-07-21)
+
+
+### Features
+
+* **schematic:** support native pin no-connect state ([#329](https://github.com/oaslananka/easyeda-mcp-pro/issues/329)) ([e9a534c](https://github.com/oaslananka/easyeda-mcp-pro/commit/e9a534c761e0a8453714d8edcd089af109349e1f))
+
+## [0.34.4](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.34.3...easyeda-mcp-pro-v0.34.4) (2026-07-20)
+
+
+### Bug Fixes
+
+* **bridge:** recover from silent register sockets ([#317](https://github.com/oaslananka/easyeda-mcp-pro/issues/317)) ([17f0334](https://github.com/oaslananka/easyeda-mcp-pro/commit/17f03347f12a9f167081c2166c7373e94262c3ac)), closes [#307](https://github.com/oaslananka/easyeda-mcp-pro/issues/307)
+* **bridge:** resolve browser WebSocket through globalThis ([#321](https://github.com/oaslananka/easyeda-mcp-pro/issues/321)) ([f61f54d](https://github.com/oaslananka/easyeda-mcp-pro/commit/f61f54d3015c94d9bcb3d38db4f48c778f3f1c4b))
+* **ci:** restore Sonar security gate ([#326](https://github.com/oaslananka/easyeda-mcp-pro/issues/326)) ([2366495](https://github.com/oaslananka/easyeda-mcp-pro/commit/236649507f182f868ffefc5c89ae9c7009edc424))
+* **config:** reject invalid boolean literals ([#315](https://github.com/oaslananka/easyeda-mcp-pro/issues/315)) ([0d9100c](https://github.com/oaslananka/easyeda-mcp-pro/commit/0d9100cbdba37d1b04e2125a4c7e3b29f5e3c420)), closes [#311](https://github.com/oaslananka/easyeda-mcp-pro/issues/311)
+* **remote:** preserve destructive risk classification ([#314](https://github.com/oaslananka/easyeda-mcp-pro/issues/314)) ([1f961de](https://github.com/oaslananka/easyeda-mcp-pro/commit/1f961de3d332ee7e9b9629ec988371f792bd0b34)), closes [#310](https://github.com/oaslananka/easyeda-mcp-pro/issues/310)
+* **schematic:** bound collision scan RPCs ([#322](https://github.com/oaslananka/easyeda-mcp-pro/issues/322)) ([ff9e0dc](https://github.com/oaslananka/easyeda-mcp-pro/commit/ff9e0dc11fc2ecaeb667de446a5d76885d304cd1))
+* **schematic:** bound net-detail reads ([#323](https://github.com/oaslananka/easyeda-mcp-pro/issues/323)) ([4bccca7](https://github.com/oaslananka/easyeda-mcp-pro/commit/4bccca78ec2fcbabc63327e43b87146b83b33211))
+* **schematic:** recover focused sheet metadata ([#324](https://github.com/oaslananka/easyeda-mcp-pro/issues/324)) ([829c8fc](https://github.com/oaslananka/easyeda-mcp-pro/commit/829c8fc395ac3026916bbde25ce144a370b8c32c))
+* **security:** require OAuth for remote HTTP ([#313](https://github.com/oaslananka/easyeda-mcp-pro/issues/313)) ([a37a516](https://github.com/oaslananka/easyeda-mcp-pro/commit/a37a516e1886d43e2973c38f5c5184bb0d1bf8ab)), closes [#309](https://github.com/oaslananka/easyeda-mcp-pro/issues/309)
+
+## [0.34.3](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.34.2...easyeda-mcp-pro-v0.34.3) (2026-07-14)
+
+
+### Bug Fixes
+
+* **pcb:** harden runtime readiness ([#304](https://github.com/oaslananka/easyeda-mcp-pro/issues/304)) ([#305](https://github.com/oaslananka/easyeda-mcp-pro/issues/305)) ([e68d2f6](https://github.com/oaslananka/easyeda-mcp-pro/commit/e68d2f6682d3f85fd7f8c45cbbf00c5fb7281c1a))
+
+## [0.34.2](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.34.1...easyeda-mcp-pro-v0.34.2) (2026-07-14)
+
+
+### Bug Fixes
+
+* **bridge:** align extension registry and modernize actions ([1426388](https://github.com/oaslananka/easyeda-mcp-pro/commit/1426388c6cc8423d5d706e53562b535ec210cfdd))
+* **bridge:** keep extension method registry in parity ([08c6f8d](https://github.com/oaslananka/easyeda-mcp-pro/commit/08c6f8da6c66fb426574c3d07891fab474cce0f8))
+
+## [0.34.1](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.34.0...easyeda-mcp-pro-v0.34.1) (2026-07-14)
+
+
+### Bug Fixes
+
+* **bridge:** preserve complete normalized values ([#295](https://github.com/oaslananka/easyeda-mcp-pro/issues/295)) ([e467af7](https://github.com/oaslananka/easyeda-mcp-pro/commit/e467af7f5c10a5c507d0b3baefad710645774585))
+* **bridge:** stop truncating normalized API values ([698058c](https://github.com/oaslananka/easyeda-mcp-pro/commit/698058cfc612a86bc7a69dbafbadc418bf8f1657))
+* **design-rules:** expose lookup input schema ([09ae084](https://github.com/oaslananka/easyeda-mcp-pro/commit/09ae084b499d99e000c742c99cd78c530720427c))
+* **design-rules:** expose lookup input schema ([#292](https://github.com/oaslananka/easyeda-mcp-pro/issues/292)) ([40fae49](https://github.com/oaslananka/easyeda-mcp-pro/commit/40fae4991166fe593d7b92da9684e4fd189579e9))
+* **visual:** capture requested canvas regions reliably ([da8a768](https://github.com/oaslananka/easyeda-mcp-pro/commit/da8a768ae57a72920d695a24521a94457c23a0df))
+* **visual:** stabilize region capture zoom ([#294](https://github.com/oaslananka/easyeda-mcp-pro/issues/294)) ([cc37675](https://github.com/oaslananka/easyeda-mcp-pro/commit/cc376758d19c82e72b829a6040535d0141f402af))
+
+## [0.34.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.33.0...easyeda-mcp-pro-v0.34.0) (2026-07-13)
+
+
+### Features
+
+* **schematic-layout:** live connectivity fingerprint ([#273](https://github.com/oaslananka/easyeda-mcp-pro/issues/273)) ([239f731](https://github.com/oaslananka/easyeda-mcp-pro/commit/239f731ce28a029543dcefe56cd9f11e5a9ebbb9))
+* **schematic-layout:** live connectivity fingerprint for [#273](https://github.com/oaslananka/easyeda-mcp-pro/issues/273) ([480d78d](https://github.com/oaslananka/easyeda-mcp-pro/commit/480d78d9e43a466703d92861ce3ae227d090751a))
+* **schematic-layout:** live deterministic functional-block layout planner for [#272](https://github.com/oaslananka/easyeda-mcp-pro/issues/272) ([3d0306b](https://github.com/oaslananka/easyeda-mcp-pro/commit/3d0306b6f4b19051aac19d3670e81c60e7add792))
+* **schematic-layout:** live functional-block layout planner ([#272](https://github.com/oaslananka/easyeda-mcp-pro/issues/272)) ([00da038](https://github.com/oaslananka/easyeda-mcp-pro/commit/00da03887f54c74228df29266125e7498b523c0e))
+* **schematic-layout:** live placement check / safe-region search ([#243](https://github.com/oaslananka/easyeda-mcp-pro/issues/243)) ([b78d97c](https://github.com/oaslananka/easyeda-mcp-pro/commit/b78d97c4d9fc5cab3c0702f9306c5dfb9e3a12fc))
+* **schematic-layout:** live placement check + safe-region search for [#243](https://github.com/oaslananka/easyeda-mcp-pro/issues/243) ([be4b182](https://github.com/oaslananka/easyeda-mcp-pro/commit/be4b18241292ca6e2342dd41bce5c60598a18bd8))
+* **schematic-layout:** live primitive bounding boxes ([#271](https://github.com/oaslananka/easyeda-mcp-pro/issues/271)) ([b8955ca](https://github.com/oaslananka/easyeda-mcp-pro/commit/b8955ca3fcf20c7a2361bc909be9c6f403c7e752))
+* **schematic-layout:** live primitive bounding boxes for [#271](https://github.com/oaslananka/easyeda-mcp-pro/issues/271) ([c32ac7b](https://github.com/oaslananka/easyeda-mcp-pro/commit/c32ac7bbc7535aac83e69325aa432418b8348799))
+* **schematic-layout:** wire confirmWrite-gated layout autofix apply mode ([8cc960c](https://github.com/oaslananka/easyeda-mcp-pro/commit/8cc960c93aa2a377b26e572cf3d3dbd378850316))
+* **schematic-layout:** wire confirmWrite-gated layout autofix apply mode ([ffe3e5b](https://github.com/oaslananka/easyeda-mcp-pro/commit/ffe3e5bd083834eb6df281d778f12d92b9b92e65))
+* **schematic-layout:** wire easyeda_schematic_layout_autofix (preview mode) ([dd13f8f](https://github.com/oaslananka/easyeda-mcp-pro/commit/dd13f8f55f55862790d447ada7684fcb560a5de7))
+* **schematic-layout:** wire easyeda_schematic_layout_autofix (preview mode) ([4e3a531](https://github.com/oaslananka/easyeda-mcp-pro/commit/4e3a531c4f1eb34fa3e3a8ff6dce243ea7c3adc4))
+* **workflows:** add visible RP2040 scaffold sections ([d52a943](https://github.com/oaslananka/easyeda-mcp-pro/commit/d52a943a202ccbbd0f8c4099780ff99520524cf5))
+* **workflows:** add visible RP2040 scaffold sections ([1dc4c3a](https://github.com/oaslananka/easyeda-mcp-pro/commit/1dc4c3a5884065ba0e8983c033be482ec15bc271))
+
+
+### Bug Fixes
+
+* **ne555-astable:** stop createWireStubs from crashing every live apply ([7944938](https://github.com/oaslananka/easyeda-mcp-pro/commit/794493899e055c6bbc5c4237b0c5edebe706abc1))
+* **ne555-astable:** stop createWireStubs from crashing every live apply (partial [#253](https://github.com/oaslananka/easyeda-mcp-pro/issues/253)) ([d4bc2e7](https://github.com/oaslananka/easyeda-mcp-pro/commit/d4bc2e72032f84995120c9c5cb9a837272d6e057))
+* **schematic-layout-qa:** resolve component refs from listComponents, not primitiveBounds ([90f795a](https://github.com/oaslananka/easyeda-mcp-pro/commit/90f795ae6301b360a66163fdc13de7e6a1d3d4f5))
+* **schematic-layout-qa:** resolve component refs from listComponents, not primitiveBounds ([#288](https://github.com/oaslananka/easyeda-mcp-pro/issues/288)) ([24b7969](https://github.com/oaslananka/easyeda-mcp-pro/commit/24b796927e4b6bdac53d89832bb42f931bebdef5))
+* **schematic-layout:** clear remaining quality-gate failures on PR [#278](https://github.com/oaslananka/easyeda-mcp-pro/issues/278) ([41f2c74](https://github.com/oaslananka/easyeda-mcp-pro/commit/41f2c74b1f5dda932ea8b45b4cf4cd7e194ebf6e))
+* **schematic-layout:** resolve CI quality-gate failures on PR [#278](https://github.com/oaslananka/easyeda-mcp-pro/issues/278) ([fc0b4fb](https://github.com/oaslananka/easyeda-mcp-pro/commit/fc0b4fbbced383723938d66d15f60aaee2af2fd4))
+
+## [0.33.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.32.0...easyeda-mcp-pro-v0.33.0) (2026-07-11)
+
+
+### Features
+
+* **remote:** productionize durable relay routing ([#267](https://github.com/oaslananka/easyeda-mcp-pro/issues/267)) ([9d1d426](https://github.com/oaslananka/easyeda-mcp-pro/commit/9d1d426c178712ae3f141d0fe1ee07635e56dfe6))
+
+
+### Bug Fixes
+
+* **config:** anchor default storage paths to user home ([#266](https://github.com/oaslananka/easyeda-mcp-pro/issues/266)) ([33bd280](https://github.com/oaslananka/easyeda-mcp-pro/commit/33bd280c35df86470bf6e51be1217a50eaab37ed))
+* **remote:** distinguish relay dispatch failures ([#263](https://github.com/oaslananka/easyeda-mcp-pro/issues/263)) ([91a1bca](https://github.com/oaslananka/easyeda-mcp-pro/commit/91a1bca250d69b10ef2ef1ccd30f093d6b230152))
+
+## [0.32.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.31.0...easyeda-mcp-pro-v0.32.0) (2026-07-11)
+
+
+### Features
+
+* **schematic:** add transactional normalization engine ([#261](https://github.com/oaslananka/easyeda-mcp-pro/issues/261)) ([eb1b9b8](https://github.com/oaslananka/easyeda-mcp-pro/commit/eb1b9b85155cce7e883d26f53cc8d67c70f4850c))
+
+## [0.31.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.30.0...easyeda-mcp-pro-v0.31.0) (2026-07-09)
+
+
+### Features
+
+* **workflows:** add RP2040 servo-module scaffold ([#259](https://github.com/oaslananka/easyeda-mcp-pro/issues/259)) ([563abdb](https://github.com/oaslananka/easyeda-mcp-pro/commit/563abdb0b5845f90e958e14cbdf1d0bae7254fbc))
+
+## [0.30.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.29.1...easyeda-mcp-pro-v0.30.0) (2026-07-09)
+
+
+### Features
+
+* **workflows:** add NE555 visible wire stubs ([#256](https://github.com/oaslananka/easyeda-mcp-pro/issues/256)) ([bbb7483](https://github.com/oaslananka/easyeda-mcp-pro/commit/bbb74833bec7586fba2efc35304e3b53572eedc5))
+
+## [0.29.1](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.29.0...easyeda-mcp-pro-v0.29.1) (2026-07-09)
+
+
+### Bug Fixes
+
+* **workflows:** reduce NE555 detached netports ([a686353](https://github.com/oaslananka/easyeda-mcp-pro/commit/a686353bbae9ab45a3b684a9373eb14e1fc02b2f))
+
+## [0.29.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.28.0...easyeda-mcp-pro-v0.29.0) (2026-07-09)
+
+
+### Features
+
+* **workflows:** add NE555 astable template ([bed3cc7](https://github.com/oaslananka/easyeda-mcp-pro/commit/bed3cc7fa13fdc28a6406adaea6cae1d7d57a57a))
+
+## [0.28.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.27.0...easyeda-mcp-pro-v0.28.0) (2026-07-09)
+
+
+### Features
+
+* **schematic:** add post-write QA classifier ([1a555f3](https://github.com/oaslananka/easyeda-mcp-pro/commit/1a555f396d0f5f5bdb8516a0b59aab65aeb6bc09))
+
+## [0.27.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.26.0...easyeda-mcp-pro-v0.27.0) (2026-07-09)
+
+
+### Features
+
+* **schematic:** add safe region planner ([#247](https://github.com/oaslananka/easyeda-mcp-pro/issues/247)) ([4441530](https://github.com/oaslananka/easyeda-mcp-pro/commit/444153014a0f94c189271d81d0ae2297f7bf029b))
+
+## [0.26.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.25.0...easyeda-mcp-pro-v0.26.0) (2026-07-09)
+
+
+### Features
+
+* **remote:** add relay readiness doctor checks ([fd1463e](https://github.com/oaslananka/easyeda-mcp-pro/commit/fd1463e12bffaa532a5c38b6c70e98b361b8b628))
+
+
+### Bug Fixes
+
+* **bridge:** include list rectangles in method registry ([10e6806](https://github.com/oaslananka/easyeda-mcp-pro/commit/10e6806b0f281933963ff3a6f91e53ec91707767))
+* **dispatcher:** avoid duplicate same-net wire labels ([0f5cdff](https://github.com/oaslananka/easyeda-mcp-pro/commit/0f5cdffac9b23f0bb20499197c4c2121b3b46e2b))
+
+## [0.25.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.24.2...easyeda-mcp-pro-v0.25.0) (2026-07-09)
+
+
+### Features
+
+* **extension:** harden remote relay reconnects ([#235](https://github.com/oaslananka/easyeda-mcp-pro/issues/235)) ([da9201a](https://github.com/oaslananka/easyeda-mcp-pro/commit/da9201a234f48b2e9dd643caf9486de8d1e44fc3))
+* **remote:** add MCP relay backend foundation ([#238](https://github.com/oaslananka/easyeda-mcp-pro/issues/238)) ([5c73c80](https://github.com/oaslananka/easyeda-mcp-pro/commit/5c73c80a3aab1b28e11afc37337654796f17340e))
+
+
+### Bug Fixes
+
+* **vendors:** use locale-aware cache key sorting ([b875c94](https://github.com/oaslananka/easyeda-mcp-pro/commit/b875c946797988e6b4f06d7ada0aa6621c119cf0))
+
+## [0.24.2](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.24.1...easyeda-mcp-pro-v0.24.2) (2026-07-09)
+
+
+### Bug Fixes
+
+* **dispatcher:** modify Circle/Polygon primitives correctly; fix Rectangle Y-sign ([#229](https://github.com/oaslananka/easyeda-mcp-pro/issues/229)) ([627c082](https://github.com/oaslananka/easyeda-mcp-pro/commit/627c0822bc5f2193d3053028313ad2f7a1e4a110))
+
+## [0.24.1](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.24.0...easyeda-mcp-pro-v0.24.1) (2026-07-08)
+
+
+### Bug Fixes
+
+* **bridge:** safe write-loop + collision/wire-follow fixes for schematic MCP tools ([#227](https://github.com/oaslananka/easyeda-mcp-pro/issues/227)) ([dd61d51](https://github.com/oaslananka/easyeda-mcp-pro/commit/dd61d5160df639e9f547f296f855e21262afb7c9))
+
+## [0.24.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.23.0...easyeda-mcp-pro-v0.24.0) (2026-07-07)
+
+
+### Features
+
+* add CDP bridge backend for EasyEDA debug mode ([f3e7990](https://github.com/oaslananka/easyeda-mcp-pro/commit/f3e7990dcfd9bbdefeff3a5a3973b4f1967bdaf4))
+
+## [0.23.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.22.0...easyeda-mcp-pro-v0.23.0) (2026-07-07)
+
+
+### Features
+
+* auto-extract live semantic ERC (B5) + live write-path regression suite (B6) ([#221](https://github.com/oaslananka/easyeda-mcp-pro/issues/221)) ([b5552c9](https://github.com/oaslananka/easyeda-mcp-pro/commit/b5552c967f123d3f10f508291ec7f90abc9a8c76))
+
+## [0.22.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.21.0...easyeda-mcp-pro-v0.22.0) (2026-07-07)
+
+
+### Features
+
+* **bridge:** hot-swappable dispatcher + schematic/ERC tool fixes (live-dogfooded) ([#218](https://github.com/oaslananka/easyeda-mcp-pro/issues/218)) ([2022493](https://github.com/oaslananka/easyeda-mcp-pro/commit/2022493c4aceb36c9378bbc91f647fb555d724cb))
+* **pcb:** add PCB readback tools; fix delete_component silently ignoring vias/tracks ([#220](https://github.com/oaslananka/easyeda-mcp-pro/issues/220)) ([fe924c8](https://github.com/oaslananka/easyeda-mcp-pro/commit/fe924c83a07984137b2c62ed5fb6041a74203637))
+
+
+### Bug Fixes
+
+* **security:** pin unpinned dependencies and fix tainted format string ([#216](https://github.com/oaslananka/easyeda-mcp-pro/issues/216)) ([a3673ca](https://github.com/oaslananka/easyeda-mcp-pro/commit/a3673ca00514ca3d7936510fbf5436fccf955083))
+
+## [0.21.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.20.0...easyeda-mcp-pro-v0.21.0) (2026-07-06)
+
+
+### Features
+
+* **catalog:** add a thin, honest device ingestion pipeline ([#207](https://github.com/oaslananka/easyeda-mcp-pro/issues/207)) ([a6495c0](https://github.com/oaslananka/easyeda-mcp-pro/commit/a6495c064976efd8800178d83f6b9d9fd1fcd5b2))
+* **diagnostics:** enrich health checks and add doctor --fix guidance ([#197](https://github.com/oaslananka/easyeda-mcp-pro/issues/197)) ([4f5317c](https://github.com/oaslananka/easyeda-mcp-pro/commit/4f5317cd4127611ce96fb4af6f0efa248d263edf))
+* **vendors:** fix and expand keyless LCSC sourcing tier ([#195](https://github.com/oaslananka/easyeda-mcp-pro/issues/195)) ([78e784a](https://github.com/oaslananka/easyeda-mcp-pro/commit/78e784ac1d2fb7ed46e18f491643105b4421c6ab))
+* **visual:** add canvas capture tools and fix Blob export serialization ([#198](https://github.com/oaslananka/easyeda-mcp-pro/issues/198)) ([225e28c](https://github.com/oaslananka/easyeda-mcp-pro/commit/225e28ce4214accdedd6c2bb1b6112f2396f29ca))
+* WS-06 through WS-13 — engineering knowledge pack, workflows, autorouting, simulation, golden benchmark, continuity audit ([#214](https://github.com/oaslananka/easyeda-mcp-pro/issues/214)) ([0e9e63c](https://github.com/oaslananka/easyeda-mcp-pro/commit/0e9e63c75f564611333e94f3b1478f9770b6f20e))
+
+## [0.20.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.19.0...easyeda-mcp-pro-v0.20.0) (2026-07-04)
+
+
+### Features
+
+* add schematic placement safety guardrails ([#189](https://github.com/oaslananka/easyeda-mcp-pro/issues/189)) ([3e8ccea](https://github.com/oaslananka/easyeda-mcp-pro/commit/3e8ccea01f5c7833435a37d6ad4c5530c1fe49e9))
+* add schematic sheet info tool ([f5b8bf1](https://github.com/oaslananka/easyeda-mcp-pro/commit/f5b8bf12fd2b90789e04c00afd08d7f678f018fc))
+* add schematic write verification tool ([a2e2332](https://github.com/oaslananka/easyeda-mcp-pro/commit/a2e2332eac0a53942375b7a639b796ff7e041fa6))
+* expose schematic search device metadata ([166949f](https://github.com/oaslananka/easyeda-mcp-pro/commit/166949fb2619ce1f77719cadf565fda81dca8b72))
+
+
+### Bug Fixes
+
+* align bridge runtime paths with EasyEDA inventory ([200587e](https://github.com/oaslananka/easyeda-mcp-pro/commit/200587e1a41cee034bdc34e4925ef1abcbc3c5ef))
+* **bridge:** correct net-flag/net-port runtime API paths ([b436d15](https://github.com/oaslananka/easyeda-mcp-pro/commit/b436d1576ea4dc041c32c3b1b8ca6e456aeb4ebe))
+* **bridge:** correct net-flag/net-port runtime API paths ([f8ad088](https://github.com/oaslananka/easyeda-mcp-pro/commit/f8ad088eecaaaccd90b35d3cc1a13a18f9763490))
+* initialize logger before bridge connect in live scripts ([c54a5b8](https://github.com/oaslananka/easyeda-mcp-pro/commit/c54a5b8a378e5564641b2abf45555ffcd70aca51))
+* initialize logger before bridge connect in live scripts ([7c08323](https://github.com/oaslananka/easyeda-mcp-pro/commit/7c08323a8086d54ccb7995b408bc617527a7be1c))
+
+## [0.19.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.18.0...easyeda-mcp-pro-v0.19.0) (2026-07-04)
+
+
+### Features
+
+* **circuit:** add component planning synthesis ([#157](https://github.com/oaslananka/easyeda-mcp-pro/issues/157)) ([882f912](https://github.com/oaslananka/easyeda-mcp-pro/commit/882f9125dd7ce17bb575d9aef983c7daeaa03534))
+* **remote:** add hosted runtime endpoints ([#161](https://github.com/oaslananka/easyeda-mcp-pro/issues/161)) ([6229683](https://github.com/oaslananka/easyeda-mcp-pro/commit/622968357f18fbd84907c682940800e46ab0083e))
+
+## [0.18.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.17.1...easyeda-mcp-pro-v0.18.0) (2026-07-03)
+
+
+### Features
+
+* add extension remote relay mode ([#119](https://github.com/oaslananka/easyeda-mcp-pro/issues/119)) ([29db9ea](https://github.com/oaslananka/easyeda-mcp-pro/commit/29db9ea6d481aa8272d4cc729575a3551c021f72))
+* add remote MCP routing core ([#117](https://github.com/oaslananka/easyeda-mcp-pro/issues/117)) ([02e5efc](https://github.com/oaslananka/easyeda-mcp-pro/commit/02e5efca112578038cde066597feae68fb6d091a))
+
+## [0.17.1](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.17.0...easyeda-mcp-pro-v0.17.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* harden release and governance checks ([#95](https://github.com/oaslananka/easyeda-mcp-pro/issues/95)) ([9d8c5cc](https://github.com/oaslananka/easyeda-mcp-pro/commit/9d8c5cca690120533e2027fa34fe4df250a529cc))
+
+## [0.17.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.16.0...easyeda-mcp-pro-v0.17.0) (2026-07-02)
+
+
+### Features
+
+* add quote workflow gate ([016b5c2](https://github.com/oaslananka/easyeda-mcp-pro/commit/016b5c258afef7dba6ce9268746d6c68032a846a))
+* add quote workflow gate ([18f6e52](https://github.com/oaslananka/easyeda-mcp-pro/commit/18f6e52c711e633b92c3d76a0bd5f52520891853))
+
+## [0.16.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.15.0...easyeda-mcp-pro-v0.16.0) (2026-07-02)
+
+
+### Features
+
+* add component quality scoring ([5a02506](https://github.com/oaslananka/easyeda-mcp-pro/commit/5a025067d757cf073790074a6d7048cf77c73ad8))
+* add component quality scoring ([421622d](https://github.com/oaslananka/easyeda-mcp-pro/commit/421622d8934fb51f4eb01286aee26e5e98a30f59))
+
+## [0.15.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.14.0...easyeda-mcp-pro-v0.15.0) (2026-07-02)
+
+
+### Features
+
+* add benchmark suite ([1837107](https://github.com/oaslananka/easyeda-mcp-pro/commit/1837107072ec051732a447d0a00362ee8ea8149e))
+* add benchmark suite ([d03d03f](https://github.com/oaslananka/easyeda-mcp-pro/commit/d03d03f6880c19d87398da57b703c1df60998520))
+
+## [0.14.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.13.0...easyeda-mcp-pro-v0.14.0) (2026-07-01)
+
+
+### Features
+
+* add observability budgets ([d15965c](https://github.com/oaslananka/easyeda-mcp-pro/commit/d15965cf48d3445bd9a450db3b96b1ca4cfb4292))
+* add observability budgets ([88fdc70](https://github.com/oaslananka/easyeda-mcp-pro/commit/88fdc7000e96b7cd244743b9bfcc124b62460757))
+
+## [0.13.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.12.0...easyeda-mcp-pro-v0.13.0) (2026-07-01)
+
+
+### Features
+
+* add production qa artifacts ([c7be755](https://github.com/oaslananka/easyeda-mcp-pro/commit/c7be755612a754b7c5cc55d4cb6ad6024a941023))
+* add production qa artifacts ([5fe3654](https://github.com/oaslananka/easyeda-mcp-pro/commit/5fe3654e2461d1492fbab2c1896d53ef5023fe77))
+
+## [0.12.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.11.0...easyeda-mcp-pro-v0.12.0) (2026-07-01)
+
+
+### Features
+
+* add layout planning tools ([685e157](https://github.com/oaslananka/easyeda-mcp-pro/commit/685e157b4d2f478615ddd720f8a7df2f1b237631))
+* add layout planning tools ([d6bf84f](https://github.com/oaslananka/easyeda-mcp-pro/commit/d6bf84f7972c88547452ca5d3d55e7dc1fc06311))
+
+## [0.11.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.10.0...easyeda-mcp-pro-v0.11.0) (2026-07-01)
+
+
+### Features
+
+* add budget analyzer ([b030b6e](https://github.com/oaslananka/easyeda-mcp-pro/commit/b030b6ec1f0429b4b36508c6b74ca58fb18afdd9))
+* add budget analyzer ([64af036](https://github.com/oaslananka/easyeda-mcp-pro/commit/64af03634a42821e04e670aaba09b3d8108a835d))
+
+## [0.10.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.9.0...easyeda-mcp-pro-v0.10.0) (2026-07-01)
+
+
+### Features
+
+* **pcb:** add production review rules ([37aaf04](https://github.com/oaslananka/easyeda-mcp-pro/commit/37aaf044d901aa67e5aea21870d73bb52a6425d2))
+* **pcb:** add production review rules ([b35f7a6](https://github.com/oaslananka/easyeda-mcp-pro/commit/b35f7a6e1be42f2ded76bce61f3facbdb4ecc8ca))
+
+## [0.9.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.8.0...easyeda-mcp-pro-v0.9.0) (2026-07-01)
+
+
+### Features
+
+* **erc:** add semantic pin validation rules ([f043faa](https://github.com/oaslananka/easyeda-mcp-pro/commit/f043faa4b20becb8e6bd5a8877f69679a425bb7d))
+* **erc:** add semantic pin validation rules ([0fe04d4](https://github.com/oaslananka/easyeda-mcp-pro/commit/0fe04d43fdffe4e0e94078b10c746aaa86c01e91))
+
+## [0.8.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.7.0...easyeda-mcp-pro-v0.8.0) (2026-07-01)
+
+
+### Features
+
+* **vendors:** harden BOM sourcing failure handling ([0f48a29](https://github.com/oaslananka/easyeda-mcp-pro/commit/0f48a292b9e51224d9b3377205712fd1071401e9))
+* **vendors:** harden BOM sourcing failure handling ([b27c264](https://github.com/oaslananka/easyeda-mcp-pro/commit/b27c264a2070ad2114fd24d1578339c56721bf68))
+
+## [0.7.0](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.6.10...easyeda-mcp-pro-v0.7.0) (2026-07-01)
+
+
+### Features
+
+* **export:** enforce manufacturing package manifest checks ([d15b34a](https://github.com/oaslananka/easyeda-mcp-pro/commit/d15b34a11c2cb113e768c0adee3d1575e8329f8f))
+* **export:** enforce manufacturing package manifest checks ([ea3adff](https://github.com/oaslananka/easyeda-mcp-pro/commit/ea3adff1e4229a9957c5fff6808bfa3ff2094d3f))
+
+## [0.6.10](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.6.9...easyeda-mcp-pro-v0.6.10) (2026-07-01)
+
+
+### Bug Fixes
+
+* **extension:** sanitize marketplace package content ([9f33e37](https://github.com/oaslananka/easyeda-mcp-pro/commit/9f33e378c6019f239c1b90bebebf0f284d25980e))
+* **extension:** sanitize marketplace package content ([6062fa7](https://github.com/oaslananka/easyeda-mcp-pro/commit/6062fa716f0ea6a7fb61482e74b33c17a221cfcf))
+
+## [0.6.9](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.6.8...easyeda-mcp-pro-v0.6.9) (2026-07-01)
+
+
+### Bug Fixes
+
+* **extension:** use marketplace-compatible bugs URL ([556b710](https://github.com/oaslananka/easyeda-mcp-pro/commit/556b7107b8654171562431576f2b206edd18726a))
+* **extension:** use marketplace-compatible bugs URL ([fc9cb8b](https://github.com/oaslananka/easyeda-mcp-pro/commit/fc9cb8b36d600e54033bb690540899cc57b2db41))
+
+## [0.6.8](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.6.7...easyeda-mcp-pro-v0.6.8) (2026-07-01)
+
+
+### Bug Fixes
+
+* **extension:** release marketplace-ready package metadata ([9d770fa](https://github.com/oaslananka/easyeda-mcp-pro/commit/9d770fa2a5eec601d92173a0afdd5380ad63168e))
+* **extension:** release marketplace-ready package metadata ([9c6f26e](https://github.com/oaslananka/easyeda-mcp-pro/commit/9c6f26e584c1085c7721f3567be084259f18c13c))
+
+## [0.6.7](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.6.6...easyeda-mcp-pro-v0.6.7) (2026-06-30)
+
+
+### Bug Fixes
+
+* infer EasyEDA v3 schematic nets from wire coordinates ([93cb0af](https://github.com/oaslananka/easyeda-mcp-pro/commit/93cb0afc8150f92be4a8983d8863e0721a443614))
+* infer EasyEDA v3 schematic nets from wire coordinates ([061913f](https://github.com/oaslananka/easyeda-mcp-pro/commit/061913f6e364b7942cc5179d66461314c75f7534))
+
+## [0.6.6](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.6.5...easyeda-mcp-pro-v0.6.6) (2026-06-30)
+
+
+### Bug Fixes
+
+* flatten wire probe runtime output ([ed411eb](https://github.com/oaslananka/easyeda-mcp-pro/commit/ed411eb03b65f7b8ba5d2bbd540247f59e2a43ba))
+* flatten wire probe runtime output ([cc73d04](https://github.com/oaslananka/easyeda-mcp-pro/commit/cc73d046c7686a02c3efd79e19772c682e02c2fc))
+
+## [0.6.5](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.6.4...easyeda-mcp-pro-v0.6.5) (2026-06-30)
+
+
+### Bug Fixes
+
+* add wire probe and stabilize API call schema ([ba6706b](https://github.com/oaslananka/easyeda-mcp-pro/commit/ba6706bea0c16716d5f55215cff15308970a00a9))
+* add wire probe and stabilize API call schema ([8ccd45e](https://github.com/oaslananka/easyeda-mcp-pro/commit/8ccd45e147d7928335e2285a081b84ab631b3ec5))
+
+## [0.6.4](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.6.3...easyeda-mcp-pro-v0.6.4) (2026-06-30)
+
+
+### Bug Fixes
+
+* add CLI shebang for Windows npx ([4d37921](https://github.com/oaslananka/easyeda-mcp-pro/commit/4d37921c1789f50188661495f6733c6ae46bfbbe))
+* add CLI shebang for Windows npx ([b9cb058](https://github.com/oaslananka/easyeda-mcp-pro/commit/b9cb0589a079c490865d0bb01272ff060dc90b93))
 
 ## [0.6.3](https://github.com/oaslananka/easyeda-mcp-pro/compare/easyeda-mcp-pro-v0.6.2...easyeda-mcp-pro-v0.6.3) (2026-06-30)
 

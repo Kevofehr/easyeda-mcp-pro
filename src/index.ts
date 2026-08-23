@@ -1,6 +1,8 @@
+#!/usr/bin/env node
 import 'dotenv/config';
 import {
   createDoctorReport,
+  doctorExitCode,
   formatDoctorReport,
   formatHelp,
   formatSetupLocalReport,
@@ -12,9 +14,13 @@ import type { SetupOptions } from './cli/client-definitions.js';
 import { loadEnvConfig } from './config/env.js';
 import { createServer } from './server/factory.js';
 import { createHttpTransport } from './server/transports/http.js';
+import { RemoteGateway } from './remote/gateway.js';
+import { assertSupportedNodeRuntime } from './runtime/policy.js';
 
 async function main() {
   const cli = parseCliArgs(process.argv.slice(2));
+
+  if (!['doctor', 'help', 'version'].includes(cli.command)) assertSupportedNodeRuntime();
 
   if (cli.command === 'init') {
     await runInteractiveInit();
@@ -39,7 +45,9 @@ async function main() {
   }
 
   if (cli.command === 'doctor') {
-    process.stdout.write(`${formatDoctorReport(await createDoctorReport())}\n`);
+    const report = await createDoctorReport();
+    process.stdout.write(`${formatDoctorReport(report, { fix: cli.doctorFix })}\n`);
+    process.exitCode = doctorExitCode(report);
     return;
   }
 
@@ -54,13 +62,16 @@ async function main() {
   }
 
   const config = loadEnvConfig();
-  const instance = await createServer(config);
+  const remoteGateway =
+    config.MCP_BRIDGE_BACKEND === 'remote_relay' ? new RemoteGateway() : undefined;
+  const instance = await createServer(config, { remoteGateway });
 
   if (config.TRANSPORT === 'http') {
-    const httpTransport = createHttpTransport(config);
+    const httpTransport = createHttpTransport(config, {
+      gateway: remoteGateway,
+      serverFactory: instance.createSessionServer,
+    });
     instance.httpTransport = httpTransport;
-    instance.transport = httpTransport.transport;
-    await instance.server.connect(httpTransport.transport);
     await httpTransport.start();
   } else {
     await instance.server.connect(instance.transport);

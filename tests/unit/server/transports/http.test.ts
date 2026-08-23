@@ -12,6 +12,7 @@ import {
 import type { Request, Response, NextFunction } from 'express';
 import * as http from 'node:http';
 import { generateKeyPair, exportJWK, SignJWT } from 'jose';
+import { McpServer } from '@modelcontextprotocol/server';
 
 /** Create mock Express req/res/next for middleware unit tests. */
 function mockReqRes(overrides: Partial<Request> = {}): {
@@ -241,9 +242,9 @@ describe('createHttpTransport', () => {
     try {
       const res = await fetch('http://127.0.0.1:3897/healthz', { method: 'OPTIONS' });
       expect(res.status).toBe(204);
-      expect(res.headers.get('access-control-allow-methods')).toBe('GET, POST, OPTIONS');
+      expect(res.headers.get('access-control-allow-methods')).toBe('GET, POST, DELETE, OPTIONS');
       expect(res.headers.get('access-control-allow-headers')).toBe(
-        'Content-Type, Authorization, MCP-Protocol-Version',
+        'Content-Type, Authorization, MCP-Protocol-Version, MCP-Session-Id, Last-Event-ID',
       );
       expect(res.headers.get('access-control-max-age')).toBe('86400');
       expect(res.headers.get('vary')).toBe('Origin');
@@ -583,11 +584,11 @@ describe('handleCorsPreflight', () => {
     expect(res.setHeader).toHaveBeenCalledWith('Vary', 'Origin');
     expect(res.setHeader).toHaveBeenCalledWith(
       'Access-Control-Allow-Methods',
-      'GET, POST, OPTIONS',
+      'GET, POST, DELETE, OPTIONS',
     );
     expect(res.setHeader).toHaveBeenCalledWith(
       'Access-Control-Allow-Headers',
-      'Content-Type, Authorization, MCP-Protocol-Version',
+      'Content-Type, Authorization, MCP-Protocol-Version, MCP-Session-Id, Last-Event-ID',
     );
     expect(res.setHeader).toHaveBeenCalledWith('Access-Control-Max-Age', '86400');
     expect(res.end).toHaveBeenCalled();
@@ -649,9 +650,44 @@ describe('createHttpTransport — OAuth/JWKS validation', () => {
       });
       expect(res.status).toBe(204);
       expect(res.headers.get('access-control-allow-origin')).toBe('http://localhost:5173');
-      expect(res.headers.get('access-control-allow-methods')).toBe('GET, POST, OPTIONS');
+      expect(res.headers.get('access-control-allow-methods')).toBe('GET, POST, DELETE, OPTIONS');
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('should rate-limit unauthenticated OAuth requests before authorization', async () => {
+    const { server, port } = await createOAuthApp({ HTTP_RATE_LIMIT_MAX: 1 });
+    try {
+      const first = await fetchWithPort(port);
+      expect(first.status).toBe(401);
+
+      const second = await fetchWithPort(port);
+      expect(second.status).toBe(429);
+      expect(second.headers.get('x-ratelimit-limit')).toBe('1');
+      expect(second.headers.get('x-ratelimit-remaining')).toBe('0');
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('should reject a no-Origin request without Authorization on non-loopback HTTP', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { server, port } = await createOAuthApp({
+        HTTP_HOST: '0.0.0.0',
+        ALLOWED_ORIGINS: 'https://app.example.com',
+      });
+      try {
+        const res = await fetchWithPort(port);
+        expect(res.status).toBe(401);
+        const body = (await res.json()) as { error: string; code: string };
+        expect(body.code).toBe('missing_auth');
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    } finally {
+      warnSpy.mockRestore();
     }
   });
 
@@ -837,6 +873,150 @@ describe('createHttpTransport — OAuth/JWKS validation', () => {
       expect(body.code).toBe('unsupported_token_type');
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+describe('createHttpTransport — legacy protocol migration baseline', () => {
+  async function createLegacyHarness() {
+    const config = createTestConfig({ HTTP_AUTH_DISABLED: true });
+    const transport = createHttpTransport(config, {
+      serverFactory: () =>
+        new McpServer(
+          { name: 'legacy-baseline', version: '1.0.0' },
+          { capabilities: { tools: {} } },
+        ),
+    });
+    const server = http.createServer(transport.app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string')
+      throw new Error('HTTP test server has no TCP port');
+    const mcpUrl = `http://127.0.0.1:${address.port}/mcp`;
+    return {
+      transport,
+      mcpUrl,
+      close: async () => {
+        await transport.close();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      },
+    };
+  }
+
+  function parseSseMessage(body: string): Record<string, unknown> {
+    const dataLine = body.split('\n').find((line) => line.startsWith('data: '));
+    if (!dataLine) throw new Error(`Expected SSE data line, received: ${body}`);
+    return JSON.parse(dataLine.slice('data: '.length)) as Record<string, unknown>;
+  }
+
+  const jsonAndSseHeaders = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json, text/event-stream',
+  };
+
+  it('locks in the 2025 initialize, session-bound request, and termination lifecycle', async () => {
+    const harness = await createLegacyHarness();
+    try {
+      const noSession = await fetch(harness.mcpUrl, {
+        method: 'POST',
+        headers: jsonAndSseHeaders,
+        body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'ping', params: {} }),
+      });
+      expect(noSession.status).toBe(400);
+      await expect(noSession.json()).resolves.toMatchObject({
+        jsonrpc: '2.0',
+        error: { code: -32000, message: 'Bad Request: No valid MCP session ID provided' },
+        id: null,
+      });
+      expect(harness.transport.activeSessionCount).toBe(0);
+
+      const initialize = await fetch(harness.mcpUrl, {
+        method: 'POST',
+        headers: jsonAndSseHeaders,
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-11-25',
+            capabilities: {},
+            clientInfo: { name: 'legacy-baseline', version: '1.0.0' },
+          },
+        }),
+      });
+      expect(initialize.status).toBe(200);
+      expect(initialize.headers.get('content-type')).toContain('text/event-stream');
+      const sessionId = initialize.headers.get('mcp-session-id');
+      expect(sessionId).toMatch(/^[0-9a-f-]{36}$/i);
+      expect(parseSseMessage(await initialize.text())).toMatchObject({
+        jsonrpc: '2.0',
+        id: 1,
+        result: { protocolVersion: '2025-11-25' },
+      });
+      expect(harness.transport.activeSessionCount).toBe(1);
+
+      const sessionHeaders = { ...jsonAndSseHeaders, 'MCP-Session-Id': sessionId! };
+      const initialized = await fetch(harness.mcpUrl, {
+        method: 'POST',
+        headers: sessionHeaders,
+        body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+      });
+      expect(initialized.status).toBe(202);
+
+      const ping = await fetch(harness.mcpUrl, {
+        method: 'POST',
+        headers: sessionHeaders,
+        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping', params: {} }),
+      });
+      expect(ping.status).toBe(200);
+      expect(parseSseMessage(await ping.text())).toMatchObject({
+        jsonrpc: '2.0',
+        id: 2,
+        result: {},
+      });
+
+      const terminated = await fetch(harness.mcpUrl, {
+        method: 'DELETE',
+        headers: { Accept: 'application/json, text/event-stream', 'MCP-Session-Id': sessionId! },
+      });
+      expect(terminated.status).toBe(200);
+      expect(harness.transport.activeSessionCount).toBe(0);
+
+      const afterDelete = await fetch(harness.mcpUrl, {
+        method: 'POST',
+        headers: sessionHeaders,
+        body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'ping', params: {} }),
+      });
+      expect(afterDelete.status).toBe(404);
+      await expect(afterDelete.json()).resolves.toMatchObject({
+        jsonrpc: '2.0',
+        error: { code: -32000, message: 'Session not found or expired' },
+        id: null,
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('rejects a 2026-era request before creating legacy session state', async () => {
+    const harness = await createLegacyHarness();
+    try {
+      const response = await fetch(harness.mcpUrl, {
+        method: 'POST',
+        headers: { ...jsonAndSseHeaders, 'MCP-Protocol-Version': '2026-07-28' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'server/discover', params: {} }),
+      });
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: 'Unsupported MCP protocol version',
+        code: 'unsupported_protocol_version',
+        supportedVersion: '2025-11-25',
+        requestedVersion: '2026-07-28',
+      });
+      expect(harness.transport.activeSessionCount).toBe(0);
+    } finally {
+      await harness.close();
     }
   });
 });

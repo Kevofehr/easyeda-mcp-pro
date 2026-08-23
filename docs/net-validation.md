@@ -5,7 +5,7 @@ Semantic validation for EasyEDA Pro net/wire names and topology.
 ## Overview
 
 The net validation module inspects a schematic's net list and validates it
-against 10 electrical and naming-convention rules. It operates on a decoupled
+against 17 structural, naming-convention, and semantic ERC rules. It operates on a decoupled
 input type (`NetValidationEntry[]`) that can be fed from CircuitIR, the EasyEDA
 bridge, or test fixtures.
 
@@ -39,7 +39,7 @@ Each `NetValidationIssue` contains:
 
 ### 1. Floating Net (`NET_FLOATING`)
 
-**Severity:** error  
+**Severity:** error
 **Detects:** Nets with zero node connections.
 
 ```text
@@ -49,7 +49,7 @@ Net "FLOAT" (n2) has no node connections — it is floating
 
 ### 2. Duplicate Net Name (`NET_DUPLICATE_NAME`)
 
-**Severity:** error  
+**Severity:** error
 **Detects:** Two or more nets sharing the same name (case-insensitive).
 
 ```text
@@ -60,7 +60,7 @@ Net name "3V3" is used by 2 nets: n1, n2
 
 ### 3. Accidental Short (`NET_ACCIDENTAL_SHORT`)
 
-**Severity:** error  
+**Severity:** error
 **Detects:** The same device pin connected to multiple different nets.
 
 ```text
@@ -70,35 +70,35 @@ Device pin "U1:1" is connected to 2 different nets: NET_A, NET_B
 
 ### 4. Missing Power Net (`NET_MISSING_POWER`)
 
-**Severity:** error + warning  
+**Severity:** error + warning
 **Detects:** No net with `type=power` exists. Also warns when required
 power net names (`VIN`, `3V3`) are missing.
 
 ### 5. Missing Ground Net (`NET_MISSING_GROUND`)
 
-**Severity:** error + warning  
+**Severity:** error + warning
 **Detects:** No net with `type=ground` exists. Also warns when `GND` is missing.
 
 ### 6. Missing Hierarchical Port (`NET_MISSING_HIERARCHICAL_PORT`)
 
-**Severity:** error  
+**Severity:** error
 **Detects:** An interface/port references a signal name that does not match
 any net in the design.
 
 ### 7. Unconnected Required Pin (`NET_UNCONNECTED_REQUIRED_PIN`)
 
-**Severity:** warning  
+**Severity:** warning
 **Detects:** A device that has zero net connections anywhere.
 
 ### 8. Inconsistent Cross-Sheet Interface (`NET_INCONSISTENT_CROSS_SHEET`)
 
-**Severity:** error  
+**Severity:** error
 **Detects:** Two interfaces with the same name but different pin counts or
 mismatched signal names.
 
 ### 9. Naming Convention Violation (`NET_NAMING_CONVENTION`)
 
-**Severity:** warning  
+**Severity:** warning
 **Detects:** Power nets whose names do not match power rail conventions
 (e.g. `MY_RAIL` instead of `3V3` / `VCC`), or ground nets whose names
 do not match ground conventions (e.g. `RET` instead of `GND`).
@@ -108,10 +108,77 @@ categories (power, ground, analog, digital, clock, control, high-voltage).
 
 ### 10. Protected Domain (`NET_PROTECTED_DOMAIN`)
 
-**Severity:** error  
+**Severity:** error
 **Detects:** High-voltage nets with generic unprotected names (`L`, `N`)
 or nets classified in both high-voltage **and** digital/clock domains
 (safety hazard).
+
+### 11. Output Contention (`NET_OUTPUT_CONTENTION`)
+
+**Severity:** error
+**Detects:** Two or more actively-driven outputs tied to the same signal net.
+Open-drain / tri-state buses should be modeled explicitly instead of as
+push-pull outputs.
+
+### 12. Floating Input (`NET_FLOATING_INPUT`)
+
+**Severity:** warning
+**Detects:** Input-only signal nets with no active driver and no pull-up or
+pull-down resistor path to power/ground.
+
+### 13. Power Conflict (`NET_POWER_CONFLICT`)
+
+**Severity:** error
+**Detects:** Multiple `power_source` / `power_output` pins connected to the
+same rail.
+
+### 14. Passive-Only Signal (`NET_PASSIVE_ONLY`)
+
+**Severity:** warning
+**Detects:** Signal nets that only connect passive pins and therefore have no
+observable driver or receiver context.
+
+### 15. Required Power/Ground Pin (`NET_UNPOWERED_DEVICE`)
+
+**Severity:** error
+**Detects:** Required device pins that are unconnected, or required power/ground
+pins connected to the wrong net class.
+
+### 16. Missing Decoupling (`NET_MISSING_DECOUPLING`)
+
+**Severity:** warning
+**Detects:** Devices marked with `requiresDecoupling: true` where a power input
+rail has no detected capacitor bridging that rail to a ground net.
+
+### 17. Voltage Mismatch (`NET_VOLTAGE_MISMATCH`)
+
+**Severity:** error
+**Detects:** Pin metadata expected voltage conflicting with the connected net
+voltage. Net voltage may be supplied directly or inferred from names like `3V3`
+and `5V`.
+
+## Semantic Pin Model
+
+Semantic ERC is opt-in. The semantic rules activate when nodes include
+`electricalType`/`expectedVoltage`, devices include `pins`, or a device sets
+`requiresDecoupling`.
+
+```typescript
+type PinElectricalType =
+  | 'input'
+  | 'output'
+  | 'bidirectional'
+  | 'passive'
+  | 'power_input'
+  | 'power_output'
+  | 'power_source'
+  | 'open_drain'
+  | 'tri_state'
+  | 'no_connect';
+```
+
+Pin metadata can define required pins, expected net class, expected voltage, and
+intentional no-connect allowance.
 
 ## Error Codes
 
@@ -127,6 +194,13 @@ or nets classified in both high-voltage **and** digital/clock domains
 | `NET_INCONSISTENT_CROSS_SHEET`  | error    | 8      |
 | `NET_NAMING_CONVENTION`         | warning  | 9      |
 | `NET_PROTECTED_DOMAIN`          | error    | 10     |
+| `NET_OUTPUT_CONTENTION`         | error    | 11     |
+| `NET_FLOATING_INPUT`            | warning  | 12     |
+| `NET_POWER_CONFLICT`            | error    | 13     |
+| `NET_PASSIVE_ONLY`              | warning  | 14     |
+| `NET_UNPOWERED_DEVICE`          | error    | 15     |
+| `NET_MISSING_DECOUPLING`        | warning  | 16     |
+| `NET_VOLTAGE_MISMATCH`          | error    | 17     |
 
 ## Usage
 
@@ -162,6 +236,72 @@ if (!result.valid) {
   }
 }
 ```
+
+### Semantic ERC validation
+
+```typescript
+import { validateNets } from './net-validation/index.js';
+
+const result = validateNets({
+  nets: [
+    {
+      id: '3v3',
+      name: '3V3',
+      type: 'power',
+      nodes: [
+        { deviceRef: 'U1', pin: 'VDD' },
+        { deviceRef: 'C1', pin: '1' },
+      ],
+    },
+    {
+      id: 'gnd',
+      name: 'GND',
+      type: 'ground',
+      nodes: [
+        { deviceRef: 'U1', pin: 'GND' },
+        { deviceRef: 'C1', pin: '2' },
+      ],
+    },
+    {
+      id: 'enable',
+      name: 'ENABLE',
+      type: 'signal',
+      nodes: [{ deviceRef: 'U1', pin: 'EN' }],
+    },
+  ],
+  devices: [
+    {
+      id: 'U1',
+      ref: 'U1',
+      category: 'microcontroller',
+      requiresDecoupling: true,
+      pins: [
+        {
+          pin: 'VDD',
+          electricalType: 'power_input',
+          required: true,
+          expectedNetType: 'power',
+          expectedVoltage: 3.3,
+        },
+        { pin: 'GND', electricalType: 'power_input', required: true, expectedNetType: 'ground' },
+        { pin: 'EN', electricalType: 'input' },
+      ],
+    },
+    {
+      id: 'C1',
+      ref: 'C1',
+      category: 'capacitor',
+      pins: [
+        { pin: '1', electricalType: 'passive' },
+        { pin: '2', electricalType: 'passive' },
+      ],
+    },
+  ],
+});
+```
+
+The MCP tool `easyeda_semantic_erc_validate` exposes the same model to agents.
+It is read-only and does not call the EasyEDA bridge.
 
 ### Validate or throw
 
@@ -218,7 +358,7 @@ Reserved names (`GND`, `VCC`, `VDD`, etc.) are exempt from convention checks.
 
 ### `validateNets(input: NetValidationInput): NetValidationResult`
 
-Run all 10 validation rules. Returns errors and warnings.
+Run all 17 validation rules. Returns errors and warnings.
 
 ### `validateNetsOrThrow(input: NetValidationInput): NetValidationResult`
 
@@ -236,7 +376,7 @@ Same as `validateNets` but throws the first error on failure.
 src/net-validation/
 ├── errors.ts       — Error codes, issue interface, factory helpers
 ├── schema.ts       — Input types, naming convention patterns, domain maps
-├── validation.ts   — 10 validation rules, entry points
+├── validation.ts   — 17 validation rules, entry points
 ├── fixtures.ts     — Sample net data for tests
 └── index.ts        — Barrel exports
 

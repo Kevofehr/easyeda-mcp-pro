@@ -1,17 +1,83 @@
+<div align="center">
+
 # easyeda-mcp-pro
 
-**Production-grade MCP server for EasyEDA Pro: safe PCB design inspection, BOM sourcing, manufacturing export, and AI-assisted hardware review.**
+<p>
+  Production-grade MCP server for EasyEDA Pro: safe PCB design inspection, BOM sourcing, manufacturing export, and AI-assisted hardware review.
+</p>
 
-[![CI](https://github.com/oaslananka/easyeda-mcp-pro/actions/workflows/ci.yml/badge.svg)](https://github.com/oaslananka/easyeda-mcp-pro/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/easyeda-mcp-pro.svg)](https://www.npmjs.com/package/easyeda-mcp-pro)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/oaslananka/easyeda-mcp-pro)
-
-<p align="center">
-  <a href="https://www.buymeacoffee.com/oaslananka">
-    <img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=%E2%98%95&slug=oaslananka&button_colour=FFDD00&font_colour=000000&font_family=Arial&outline_colour=000000&coffee_colour=ffffff" alt="Buy me a coffee" />
+<p>
+  <a href="https://www.npmjs.com/package/easyeda-mcp-pro">
+    <img src="https://img.shields.io/npm/v/easyeda-mcp-pro.svg?logo=npm" alt="npm version" />
+  </a>
+  <a href="https://www.npmjs.com/package/easyeda-mcp-pro">
+    <img src="https://img.shields.io/npm/dt/easyeda-mcp-pro?logo=npm&label=total%20downloads" alt="npm total downloads" />
+  </a>
+  <a href="https://www.npmjs.com/package/easyeda-mcp-pro">
+    <img src="https://img.shields.io/node/v/easyeda-mcp-pro" alt="supported Node.js version" />
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/npm/l/easyeda-mcp-pro.svg" alt="license" />
+  </a>
+  <a href="https://pnpm.io/">
+    <img src="https://img.shields.io/badge/pnpm-11.5.1-blue.svg" alt="pnpm" />
   </a>
 </p>
+
+<p>
+  <a href="https://github.com/oaslananka/easyeda-mcp-pro/actions/workflows/ci.yml">
+    <img src="https://github.com/oaslananka/easyeda-mcp-pro/actions/workflows/ci.yml/badge.svg" alt="CI status" />
+  </a>
+  <a href="https://github.com/oaslananka/easyeda-mcp-pro/actions/workflows/deploy-docs.yml">
+    <img src="https://github.com/oaslananka/easyeda-mcp-pro/actions/workflows/deploy-docs.yml/badge.svg" alt="Docs status" />
+  </a>
+  <a href="https://github.com/oaslananka/easyeda-mcp-pro/security/policy">
+    <img src="https://img.shields.io/badge/security-policy-blue" alt="Security policy" />
+  </a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/oaslananka/easyeda-mcp-pro">
+    <img src="https://api.scorecard.dev/projects/github.com/oaslananka/easyeda-mcp-pro/badge" alt="OpenSSF Scorecard" />
+  </a>
+    <a href="https://www.bestpractices.dev/projects/13406">
+    <img src="https://www.bestpractices.dev/projects/13406/badge" alt="OpenSSF Best Practices" />
+  </a>
+</p>
+
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/oaslananka/easyeda-mcp-pro)
+
+<p>
+  <a href="docs/ROADMAP.md">Roadmap</a> ·
+  <a href="docs/OPENSSF_BEST_PRACTICES.md">OpenSSF evidence</a> ·
+  <a href="docs/SECURITY_ASSURANCE_CASE.md">Security assurance case</a>
+</p>
+
+<p>
+  <strong>Compliance docs:</strong>
+  <a href="THIRD_PARTY_NOTICES.md">Third-Party Notices</a>
+  ·
+  <a href="docs/vendor-terms.md">Vendor Terms and Unsupported Workflows</a>
+  ·
+  <a href="docs/REMOTE_MCP_MODES.md">Remote MCP Modes</a>
+</p>
+
+<p>
+  <a href="https://www.buymeacoffee.com/oaslananka">
+    <img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=%E2%98%95&slug=oaslananka&button_colour=FFDD00&font_colour=000000&font_family=Inter&outline_colour=000000&coffee_colour=ffffff" height="28" alt="Buy me a coffee" />
+  </a>
+  &nbsp;&nbsp;
+  <a href="https://github.com/oaslananka/easyeda-mcp-pro">
+    <img src="https://img.shields.io/github/stars/oaslananka/easyeda-mcp-pro?style=for-the-badge&logo=github&label=Star%20on%20GitHub&color=FFA500&labelColor=181717" alt="Star on GitHub" />
+  </a>
+</p>
+
+</div>
+
+---
+
+## Trust and Supply Chain
+
+easyeda-mcp-pro keeps its public OpenSSF Best Practices evidence in [`docs/OPENSSF_BEST_PRACTICES.md`](docs/OPENSSF_BEST_PRACTICES.md) and its security assurance case in [`docs/SECURITY_ASSURANCE_CASE.md`](docs/SECURITY_ASSURANCE_CASE.md). The header badges link to workflow-backed signals only: CI, generated docs deployment, the project security policy, OpenSSF Best Practices self-certification, and the OpenSSF Scorecard. Release integrity evidence (npm provenance, signed-release status) is tracked in [`docs/RELEASE_VERIFICATION.md`](docs/RELEASE_VERIFICATION.md). Coverage, Test Analytics, and extension bundle monitoring are documented in [`docs/CODECOV_ANALYTICS.md`](docs/CODECOV_ANALYTICS.md).
+
+**Current OpenSSF Best Practices status:** Passing (100%) — see [live badge](https://www.bestpractices.dev/projects/13406) and [Silver evidence map](docs/OPENSSF_BEST_PRACTICES.md#silver-evidence) for in-progress Silver criteria.
 
 ---
 
@@ -45,7 +111,7 @@ For advanced configurations, manual instructions, and specific clients, see [Ins
 
 ## Overview
 
-easyeda-mcp-pro is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that bridges AI assistants with hardware design workflows in EasyEDA Pro. It exposes 50 default profile-gated MCP tools for schematic inspection and editing, controlled EasyEDA Pro API calls, BOM management, design rule checks, PCB board analysis, fabrication exports, and supplier integration.
+easyeda-mcp-pro is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that bridges AI assistants with hardware design workflows in EasyEDA Pro. It exposes up to 115 profile-gated MCP tools for schematic inspection and editing, controlled EasyEDA Pro API calls, BOM management, design rule checks, PCB board analysis, fabrication exports, diagnostics, and supplier integration.
 
 The server connects to EasyEDA Pro via a WebSocket bridge extension, enabling real-time access to open project data. It integrates with JLCPCB, LCSC, Mouser, and DigiKey for BOM sourcing and pricing.
 
@@ -64,14 +130,27 @@ The server connects to EasyEDA Pro via a WebSocket bridge extension, enabling re
 
 ## Prerequisites
 
-- **Node.js** >=24 <27 (required for the latest JavaScript features)
-- **pnpm** >=11 (for local development; the npm package is self-contained)
+- **Node.js**: Node.js 24.x is required; repository automation is pinned to **24.18.0**.
+- **pnpm**: local development and automation require exactly **11.5.1**.
+
+Prepare the supported runtime before installing dependencies:
+
+```bash
+nvm install 24.18.0
+nvm use 24.18.0
+corepack enable
+corepack prepare pnpm@11.5.1 --activate
+node scripts/check-runtime.mjs --require-pnpm
+```
+
 - **EasyEDA Pro** with the bundled bridge extension installed and running
 - For supplier integration: API credentials from JLCPCB, LCSC, Mouser, or DigiKey
 
 ---
 
 ## Installation & Client Configuration
+
+> Testing the v1 release candidate? Follow [Migrating to v1](docs/MIGRATING_TO_V1.md). Stable npm and container channels remain on `0.35.4` during the candidate soak.
 
 You can configure `easyeda-mcp-pro` automatically or manually.
 
@@ -360,8 +439,12 @@ pnpm doctor
 This checks:
 
 1. Node.js version compatibility.
-2. Existence of build files and the `.eext` extension package.
-3. Bridge port availability. _Note: The bridge status will show as offline until an MCP client starts the server and connects to the EasyEDA Pro extension._
+2. Runtime mode: source checkout, installed package, or production runtime.
+3. The CLI entry shebang and the `.eext` extension package checksum.
+4. Bridge port availability. _Note: The bridge status will show as offline until an MCP client starts the server and connects to the EasyEDA Pro extension._
+
+pnpm is required only for a source checkout and must match the repository pin. pnpm is not required for an installed package or production runtime, including the hardened Docker image.
+Doctor exits with status `1` for unsupported required runtimes, invalid configuration, or missing/corrupt runtime artifacts; an offline bridge by itself remains informational.
 
 ---
 
@@ -369,41 +452,48 @@ This checks:
 
 Copy `.env.example` to `.env` and edit. All variables have safe defaults — only configure what you need.
 
+Boolean environment variables use strict literals: `true` / `1` enable a setting and `false` / `0` disable it. Matching is case-insensitive and surrounding whitespace is ignored. Other values—including `yes`, `no`, `on`, `off`, `enabled`, `disabled`, empty strings, and misspellings—fail startup validation and report the offending variable. Leave a variable unset to use its documented default.
+
 ### Essential
 
-| Variable               | Default       | Description                                                                  |
-| ---------------------- | ------------- | ---------------------------------------------------------------------------- |
-| `NODE_ENV`             | `development` | Set to `production` in production                                            |
-| `LOG_LEVEL`            | `info`        | Pino log level: `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent` |
-| `TOOL_PROFILE`         | `core`        | Tool set: `core`, `pro`, `full`, `dev`, `experimental`                       |
-| `TOOL_SCOPES`          | empty         | Optional capability allowlist such as `schematic:read,bom:read`              |
-| `MCP_PROTOCOL_VERSION` | `2025-11-25`  | MCP protocol version string                                                  |
-| `TRANSPORT`            | `stdio`       | Server transport: `stdio` (default) or `http`                                |
+| Variable                | Default        | Description                                                                  |
+| ----------------------- | -------------- | ---------------------------------------------------------------------------- |
+| `NODE_ENV`              | `development`  | Set to `production` in production                                            |
+| `LOG_LEVEL`             | `info`         | Pino log level: `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent` |
+| `TOOL_PROFILE`          | `core`         | Tool set: `core`, `pro`, `full`, `dev`, `experimental`                       |
+| `TOOL_SCOPES`           | empty          | Optional capability allowlist such as `schematic:read,bom:read`              |
+| `MCP_PROTOCOL_VERSION`  | `2025-11-25`   | MCP protocol version string                                                  |
+| `MCP_BRIDGE_BACKEND`    | `local_bridge` | Bridge backend: `local_bridge` or experimental `remote_relay`                |
+| `MCP_REMOTE_SESSION_ID` | empty          | Optional fixed Remote Relay session id for `remote_relay` backend            |
+| `TRANSPORT`             | `stdio`        | Server transport: `stdio` (default) or `http`                                |
+
+For Remote Relay experiments, run `npx easyeda-mcp-pro doctor --fix` after setting `MCP_BRIDGE_BACKEND=remote_relay`; the doctor output validates HTTP transport, session selection, OAuth, and loopback-only development auth settings.
 
 ### Bridge (EasyEDA Pro connection)
 
-| Variable                        | Default       | Description                                                              |
-| ------------------------------- | ------------- | ------------------------------------------------------------------------ |
-| `BRIDGE_HOST`                   | `127.0.0.1`   | Bridge WebSocket host                                                    |
-| `BRIDGE_PORT`                   | `49620`       | Primary bridge port                                                      |
-| `BRIDGE_PORT_SCAN`              | `49620-49629` | Port scan spec (comma/range)                                             |
-| `BRIDGE_TIMEOUT_MS`             | `15000`       | Bridge call timeout (ms)                                                 |
-| `BRIDGE_HEARTBEAT_MS`           | `10000`       | Heartbeat interval (ms)                                                  |
-| `BRIDGE_RECONNECT_MAX_ATTEMPTS` | `0`           | Max reconnect attempts (`0` = infinite)                                  |
-| `BRIDGE_WAIT_FOR_EDA_MS`        | `30000`       | Wait for EasyEDA Pro on startup (ms)                                     |
-| `BRIDGE_MAX_PAYLOAD_SIZE`       | `1048576`     | Max bridge payload (bytes, default 1 MiB)                                |
-| `BRIDGE_TOKEN`                  | `''`          | Session token for extension auth                                         |
-| `BRIDGE_RAW_EXEC_ENABLED`       | `false`       | First explicit gate for raw EasyEDA runtime JavaScript execution         |
-| `MCP_RAW_EXEC_EXPERIMENTAL`     | `false`       | Second experimental gate required before `easyeda_execute` is registered |
+| Variable                    | Default       | Description                                                              |
+| --------------------------- | ------------- | ------------------------------------------------------------------------ |
+| `BRIDGE_HOST`               | `127.0.0.1`   | Bridge WebSocket host                                                    |
+| `BRIDGE_PORT`               | `49620`       | Primary bridge port                                                      |
+| `BRIDGE_PORT_SCAN`          | `49620-49629` | Port scan spec (comma/range)                                             |
+| `BRIDGE_TIMEOUT_MS`         | `15000`       | Bridge call timeout (ms)                                                 |
+| `BRIDGE_HEARTBEAT_MS`       | `10000`       | Heartbeat interval (ms)                                                  |
+| `BRIDGE_WAIT_FOR_EDA_MS`    | `30000`       | Wait for EasyEDA Pro on startup (ms)                                     |
+| `BRIDGE_MAX_PAYLOAD_SIZE`   | `1048576`     | Max bridge payload (bytes, default 1 MiB)                                |
+| `BRIDGE_TOKEN`              | `''`          | Session token for extension auth                                         |
+| `BRIDGE_RAW_EXEC_ENABLED`   | `false`       | First explicit gate for raw EasyEDA runtime JavaScript execution         |
+| `MCP_RAW_EXEC_EXPERIMENTAL` | `false`       | Second experimental gate required before `easyeda_execute` is registered |
 
 ### Storage
 
-| Variable       | Default                                   | Description                                 |
-| -------------- | ----------------------------------------- | ------------------------------------------- |
-| `DATA_DIR`     | `.easyeda-mcp-pro`                        | Data directory (cache, database, artifacts) |
-| `SQLITE_PATH`  | `.easyeda-mcp-pro/easyeda-mcp-pro.sqlite` | SQLite database path                        |
-| `ARTIFACT_DIR` | `.easyeda-mcp-pro/artifacts`              | Artifact export directory                   |
-| `CACHE_DIR`    | `.easyeda-mcp-pro/cache`                  | Cache directory                             |
+| Variable       | Default                             | Description                             |
+| -------------- | ----------------------------------- | --------------------------------------- |
+| `DATA_DIR`     | `~/.easyeda-mcp-pro`                | Base directory for writable local state |
+| `SQLITE_PATH`  | `<DATA_DIR>/easyeda-mcp-pro.sqlite` | SQLite database path                    |
+| `ARTIFACT_DIR` | `<DATA_DIR>/artifacts`              | Artifact export directory               |
+| `CACHE_DIR`    | `<DATA_DIR>/cache`                  | Cache directory                         |
+
+Storage paths are resolved in two stages. `DATA_DIR` is resolved first; each subordinate path is then derived from it with the current operating system's native path separator unless that variable was explicitly supplied. Setting only `DATA_DIR` therefore relocates the default database, artifact, and cache paths together. Explicit overrides are applied independently and retain their supplied absolute or relative semantics; relative paths remain relative to the MCP process working directory. Changing these settings does not migrate existing data automatically.
 
 ### Supplier integration
 
@@ -414,18 +504,31 @@ Enable suppliers by setting their credentials. All suppliers are disabled by def
 - **Mouser**: `MOUSER_ENABLED=true` + API key
 - **DigiKey**: `DIGIKEY_ENABLED=true` + OAuth2 client ID/secret
 
-### AI Assistance (experimental)
+Shared sourcing behavior is controlled independently of any one vendor:
 
-Configure an AI provider for LLM-assisted design review:
+| Variable                         | Default | Description                                                          |
+| -------------------------------- | ------- | -------------------------------------------------------------------- |
+| `KEYLESS_SOURCING_ENABLED`       | `true`  | Allow supported public keyless fallbacks when credentials are absent |
+| `SOURCING_CACHE_TTL_SECONDS`     | `21600` | Cache sourcing responses for six hours (`0` disables cache reuse)    |
+| `VENDOR_MIN_REQUEST_INTERVAL_MS` | `150`   | Minimum delay between outbound requests to the same sourcing vendor  |
 
-| Variable                    | Default | Description                                     |
-| --------------------------- | ------- | ----------------------------------------------- |
-| `AI_PROVIDER`               | `none`  | `anthropic`, `openai`, `openrouter`, or `local` |
-| `AI_MODEL`                  | `''`    | Model name (e.g., `claude-sonnet-4-20250514`)   |
-| `AI_API_KEY`                | `''`    | AI provider API key                             |
-| `AI_MAX_TOKENS`             | `8000`  | Max tokens per AI response                      |
-| `AI_TIMEOUT_MS`             | `60000` | AI request timeout in ms                        |
-| `AI_ALLOW_DESIGN_MUTATIONS` | `false` | Allow AI to modify schematic/board designs      |
+### Reserved AI configuration
+
+No in-process AI provider client is currently implemented. The `AI_*` variables remain accepted for
+configuration compatibility but are reported as `reserved`, are always ineffective, and must not be
+used to infer that the server sends design data to an AI provider. Do not supply an API key.
+
+| Variable                    | Default | Current behavior                                      |
+| --------------------------- | ------- | ----------------------------------------------------- |
+| `AI_PROVIDER`               | `none`  | Reserved; no provider client is invoked               |
+| `AI_MODEL`                  | `''`    | Reserved; no model is selected                        |
+| `AI_API_KEY`                | `''`    | Reserved; no credential consumer exists               |
+| `AI_MAX_TOKENS`             | `8000`  | Reserved compatibility setting                        |
+| `AI_TIMEOUT_MS`             | `60000` | Reserved compatibility setting                        |
+| `AI_ALLOW_DESIGN_MUTATIONS` | `false` | Reserved; cannot enable AI-originated design mutation |
+
+Use `easyeda_get_feature_flags` or `easyeda_get_capabilities` to inspect `configured`, `effective`,
+and `maturity` values for optional settings.
 
 ### HTTP transport
 
@@ -433,15 +536,16 @@ When using `TRANSPORT=http`:
 
 | Variable              | Default     | Description                                        |
 | --------------------- | ----------- | -------------------------------------------------- |
-| `HTTP_HOST`           | `127.0.0.1` | Bind address (use `0.0.0.0` with caution)          |
+| `HTTP_HOST`           | `127.0.0.1` | Bind address; non-loopback requires OAuth          |
 | `HTTP_PORT`           | `3000`      | Port                                               |
 | `HTTP_AUTH_DISABLED`  | `false`     | Disable HTTP auth for non-production loopback only |
 | `HTTP_RATE_LIMIT_MAX` | `100`       | Max requests per minute per IP                     |
-| `CORS_ORIGIN`         | `''`        | Allowed CORS origin                                |
+| `CORS_ORIGIN`         | `''`        | Legacy allowed origin for loopback browser clients |
+| `ALLOWED_ORIGINS`     | `''`        | Explicit remote origin allowlist; `*` is rejected  |
 
-#### Production HTTP Security
+#### Remote HTTP Security
 
-For remote HTTP deployments, OAuth 2.0 / OpenID Connect is strongly recommended:
+Every non-loopback HTTP deployment requires OAuth 2.0 / OpenID Connect authentication, regardless of `NODE_ENV`:
 
 | Variable                | Default           | Description                                  |
 | ----------------------- | ----------------- | -------------------------------------------- |
@@ -453,7 +557,25 @@ For remote HTTP deployments, OAuth 2.0 / OpenID Connect is strongly recommended:
 
 When `OAUTH_ENABLED=true`, every request to `/mcp` must include an `Authorization: Bearer <token>` header unless `HTTP_AUTH_DISABLED=true` is explicitly set for non-production loopback development. Tokens are verified against `OAUTH_JWKS_URI`, `iss`/`aud` claims are validated, and `OAUTH_REQUIRED_SCOPES` is enforced against `scope`, `scp`, `permissions`, or `roles` claims.
 
-The server enforces startup safety checks: **non-loopback `HTTP_HOST` without OAuth is rejected**, and `HTTP_AUTH_DISABLED=true` is rejected outside non-production loopback deployments.
+The server enforces startup safety checks in every environment: **non-loopback `HTTP_HOST` without OAuth is rejected**, `OAUTH_JWKS_URI` / `OAUTH_ISSUER` / `OAUTH_AUDIENCE` are required, wildcard `ALLOWED_ORIGINS=*` is rejected, and `HTTP_AUTH_DISABLED=true` remains limited to non-production loopback development. Requests without an `Origin` header still require a valid bearer token on authenticated deployments; CORS is not an authentication boundary.
+
+### Docker defaults
+
+The Docker image starts in HTTP mode with `HTTP_HOST=127.0.0.1` so the default container boot path is safe and passes the same startup safety checks as local HTTP mode. For an externally reachable container, override the bind address and configure OAuth plus an explicit, non-wildcard origin allowlist:
+
+```bash
+docker run --rm \
+  -e HTTP_HOST=0.0.0.0 \
+  -e ALLOWED_ORIGINS=https://your-client.example.com \
+  -e OAUTH_ENABLED=true \
+  -e OAUTH_ISSUER=https://issuer.example.com/ \
+  -e OAUTH_JWKS_URI=https://issuer.example.com/.well-known/jwks.json \
+  -e OAUTH_AUDIENCE=easyeda-mcp-pro \
+  -p 127.0.0.1:3000:3000 \
+  ghcr.io/oaslananka/easyeda-mcp-pro:latest
+```
+
+Do not expose non-loopback HTTP without OAuth. `ALLOWED_ORIGINS` restricts browsers but never replaces authentication. Use a reverse proxy or platform gateway for TLS termination and external access.
 
 #### HTTP Security Features
 
@@ -467,7 +589,21 @@ See `.env.example` for the complete list of configuration variables.
 
 ## MCP Tools
 
-The server currently registers 50 default profile-gated tools. Tools are filtered by the active `TOOL_PROFILE`: `core` exposes the normal workflow tools, `pro` adds manufacturing exports, `full` adds controlled documented EasyEDA API calls, and `dev` adds runtime probes for debugging.
+The server registers profile-gated tools according to the active `TOOL_PROFILE`. The table below is generated from the same registry used at runtime:
+
+<!-- capability-counts:start -->
+
+| Profile        | Registered tools |
+| -------------- | ---------------: |
+| `core`         |               76 |
+| `pro`          |              103 |
+| `full`         |              128 |
+| `dev`          |              133 |
+| `experimental` |              133 |
+
+<!-- capability-counts:end -->
+
+`core` exposes the standard workflow tools, `pro` adds manufacturing exports, `full` adds controlled documented EasyEDA API calls, and `dev` adds runtime probes for debugging.
 
 Capability scopes add a second authorization layer when `TOOL_SCOPES` is set. Leave it empty for the default local all-capabilities mode, or restrict it with comma/space separated scopes such as `diagnostics:read`, `schematic:read`, `schematic:write`, `bom:read`, `bom:source`, `checks:read`, `pcb:read`, `pcb:write`, `export:write`, `api:read`, `api:write`, and `bridge:execute`.
 
@@ -552,6 +688,35 @@ The schematic write APIs use EasyEDA Pro extension APIs that EasyEDA currently m
 | `easyeda_export_pdf`        | pro     | Export schematic/board to PDF       |
 | `easyeda_export_netlist`    | pro     | Export netlist                      |
 
+### Fork additions - headless multi-tab orchestration
+
+This fork (`Kevofehr/easyeda-mcp-pro`) adds editor/project tools so one agent can drive every
+open EasyEDA Pro tab without a human switching tabs by hand:
+
+| Tool                            | Description                                                            |
+| ------------------------------- | ---------------------------------------------------------------------- |
+| `easyeda_project_documents`     | List the documents in the open project (`dmt_Project.getInfo`)         |
+| `easyeda_editor_list_tabs`      | List open editor tabs with their document uuid, name, and active state |
+| `easyeda_editor_open`           | Open a project document in an editor tab                               |
+| `easyeda_editor_activate`       | Bring an existing editor tab to the foreground                         |
+| `easyeda_editor_close`          | Close an editor tab                                                    |
+| `easyeda_editor_focus_document` | Focus a document by `tabId`, `uuid`, or `name`                         |
+| `easyeda_editor_screenshot`     | Capture the editor canvas and return it as an MCP image content block  |
+
+Every write tool also accepts an optional `document` argument (`{ tabId | uuid | name }`).
+The server focuses that document before applying the write, and all writes are serialized
+behind a single-active-document focus lock so concurrent edits never interleave. The retrofit
+is centralized in the tool registry, so it applies uniformly to all mutation tools.
+Multi-instance parallelism is intentionally out of scope.
+
+### Fork additions - living style guide resource
+
+The fork serves [`docs/reference/schematic-pcb-style-guide.md`](docs/reference/schematic-pcb-style-guide.md)
+as the MCP resource `easyeda://guide/style`, read live from disk on every request. The review
+workflow resource and the review prompts direct the agent to read it before authoring or
+reviewing a design, and to append newly learned rules to its correction log, so the guide
+improves across projects. See [MCP resources and prompts](docs/reference/resources-prompts.md).
+
 ---
 
 ## Architecture
@@ -567,7 +732,7 @@ The schematic write APIs use EasyEDA Pro extension APIs that EasyEDA currently m
 │  (via Plugin)    │     Protocol      │  └───────────────┘  │
 └─────────────────┘                    │  ┌───────────────┐  │
                                        │  │  ToolRegistry  │  │
-                                       │  │  (41 tools)   │  │
+                                       │  │ (up to 115 tools) │ │
                                        │  └───────────────┘  │
                                        │  ┌───────────────┐  │
                                        │  │    Storage     │──┼──► SQLite
@@ -585,6 +750,10 @@ The schematic write APIs use EasyEDA Pro extension APIs that EasyEDA currently m
 - **stdio** (default): Standard MCP transport — works with Claude Desktop, Cursor, and most MCP clients
 - **HTTP**: Streamable HTTP transport with `/healthz`, `/readyz`, `/mcp` endpoints, CORS, and optional OAuth — suitable for remote deployments
 
+### Deployment modes
+
+Beyond local stdio/HTTP, the server supports a hosted remote runtime (gateway, session router, and approval-scoped relay under `src/remote/`) for managed connector deployments such as Claude Web or ChatGPT app integrations, plus a self-hosted remote mode for user-managed endpoints. See [Remote MCP Modes](docs/REMOTE_MCP_MODES.md) for the full mode matrix and network/security boundaries of each.
+
 ### Bridge extension
 
 ```bash
@@ -598,14 +767,90 @@ required by EasyEDA Pro.
 
 Installation: Open EasyEDA Pro → **Settings** → **Extensions** → **Extension Manager...** → **Import Extension**, then select the `.eext` file. Make sure **Allow External Interaction** is enabled for the extension.
 
+For local bridge development, an experimental loopback-only CDP transport is documented in the [CDP Bridge guide](docs/guide/cdp-bridge.md). The extension remains the recommended transport for normal use. Public delivery targets and milestone lifecycle rules are maintained in the [roadmap](docs/ROADMAP.md).
+
 ---
+
+## Agent plugin and skills
+
+This repository owns the product-level agent plugin and EasyEDA-specific skills for
+EasyEDA MCP Pro. The central [`agent-tools`](https://github.com/oaslananka/agent-tools)
+repository should catalog this plugin, but the manifest and workflow instructions live
+here so they stay synchronized with the actual MCP server, bridge extension, tool
+profiles, and EasyEDA runtime behavior.
+
+| File                                                                     | Purpose                                                                                         |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json)               | Claude Code-valid plugin manifest for compatible agent runtimes and marketplace catalogs.       |
+| [`.mcp.json`](.mcp.json)                                                 | Project-local Claude Code MCP server configuration.                                             |
+| [`.codex/config.example.toml`](.codex/config.example.toml)               | Codex CLI MCP configuration example.                                                            |
+| [`.vscode/mcp.example.json`](.vscode/mcp.example.json)                   | VS Code / GitHub Copilot workspace MCP configuration example.                                   |
+| [`opencode.example.jsonc`](opencode.example.jsonc)                       | OpenCode project MCP configuration example.                                                     |
+| [`.opencode/skills/`](.opencode/skills)                                  | OpenCode-native mirrored skill definitions.                                                     |
+| [`docs/agent-runtime-config.md`](docs/agent-runtime-config.md)           | Agent runtime setup and validation matrix.                                                      |
+| [`skills/easyeda-workflow/SKILL.md`](skills/easyeda-workflow/SKILL.md)   | End-to-end EasyEDA setup, inspection, controlled write, export, and reporting workflow.         |
+| [`skills/component-search/SKILL.md`](skills/component-search/SKILL.md)   | Component search, BOM review, sourcing, pricing, availability, and part-risk workflow.          |
+| [`skills/design-validation/SKILL.md`](skills/design-validation/SKILL.md) | DRC/ERC, semantic ERC, PCB constraints, production QA, export, and release-validation workflow. |
+
+### Agent setup
+
+EasyEDA MCP Pro can be launched with the published npm package or from a source checkout:
+
+```bash
+npx easyeda-mcp-pro
+TRANSPORT=http HTTP_HOST=127.0.0.1 HTTP_PORT=3000 npx easyeda-mcp-pro
+pnpm build && node dist/index.js
+```
+
+For live EasyEDA Pro workflows, install the EasyEDA bridge extension and confirm the
+bridge is reachable with `easyeda_health_check` and `easyeda_bridge_status`. Tool
+availability depends on `TOOL_PROFILE` and optional `TOOL_SCOPES` restrictions.
+
+For source checkouts, run the normal validation path before publishing plugin changes:
+
+```bash
+python3 -m json.tool .claude-plugin/plugin.json >/dev/null
+claude plugin validate .
+pnpm format:check
+pnpm typecheck
+pnpm test
+pnpm build
+pnpm check:metadata
+```
+
+### Validation workflow
+
+Before listing this plugin as active from `agent-tools`, verify at least one compatible
+agent runtime can:
+
+1. Discover `.claude-plugin/plugin.json`.
+2. Launch or connect to `easyeda-mcp-pro` over `stdio` or HTTP.
+3. Call `easyeda_health_check`, `easyeda_bridge_status`, or `easyeda_get_capabilities`.
+4. Load a skill from `skills/` and follow the workflow without referencing missing tools.
+5. Report bridge state, tool profile, ERC, DRC, BOM, export artifacts, assumptions, and
+   human-review requirements separately.
+
+EasyEDA MCP Pro is an engineering assistant, not an autonomous manufacturing sign-off
+authority. Generated designs, component selections, and fabrication outputs require
+qualified human review before purchase, fabrication, or assembly.
 
 ## Development
 
 ### Prerequisites
 
-- **Node.js** >=24 <27
-- **pnpm** >=11
+- **Node.js**: Node.js 24.x is required; repository automation is pinned to **24.18.0**.
+- **pnpm**: local development and automation require exactly **11.5.1**.
+
+Prepare the supported runtime before installing dependencies:
+
+```bash
+nvm install 24.18.0
+nvm use 24.18.0
+corepack enable
+corepack prepare pnpm@11.5.1 --activate
+node scripts/check-runtime.mjs --require-pnpm
+```
+
 - **Go Task** (optional, for Taskfile commands)
 
 ### Quick Start
@@ -616,15 +861,18 @@ pnpm install
 cp .env.example .env
 
 # All quality gates (lint + format + typecheck + test + build)
+pnpm verify
+
+# Or, if you use Go Task:
 task verify
 
-# Or use pnpm directly:
+# Use focused checks while iterating:
 pnpm format:check          # Prettier
 pnpm typecheck             # TypeScript
 pnpm lint                  # ESLint
 
 # Test
-pnpm test                  # Vitest (497 tests across 32 files)
+pnpm test                  # Vitest suite
 pnpm test:coverage         # With coverage report
 
 # Golden E2E fixture smoke tests are included in `pnpm test`
@@ -645,15 +893,17 @@ pnpm inspector
 
 This project includes a `Taskfile.yml` with the following commands:
 
-| Command          | Description                     |
-| ---------------- | ------------------------------- |
-| `task install`   | Install dependencies            |
-| `task lint`      | Run ESLint                      |
-| `task format`    | Check formatting with Prettier  |
-| `task typecheck` | Run TypeScript type checking    |
-| `task test`      | Run tests                       |
-| `task build`     | Build the project               |
-| `task verify`    | Run all quality gates (CI gate) |
+| Command          | Description                        |
+| ---------------- | ---------------------------------- |
+| `task install`   | Install dependencies               |
+| `task lint`      | Run ESLint                         |
+| `task format`    | Check formatting with Prettier     |
+| `task typecheck` | Run TypeScript type checking       |
+| `task test`      | Run tests                          |
+| `task build`     | Build the project                  |
+| `task verify`    | Run all quality gates via Taskfile |
+
+The package also exposes `pnpm verify`, which runs the same CI-equivalent local gate without requiring Go Task.
 
 Install [Go Task](https://taskfile.dev/installation/) to use these commands.
 
@@ -664,20 +914,27 @@ src/
 ├── index.ts                 # Entry point (stdio or HTTP)
 ├── bridge/                  # EasyEDA Pro WebSocket bridge protocol
 │   ├── manager.ts, protocol.ts, types.ts
-├── config/                  # Environment configuration
-│   ├── env.ts, profiles.ts, feature-flags.ts
+├── cli/                     # Client auto-setup (setup/extension CLI commands)
+├── config/                  # Environment, tool profiles, feature flags
+│   ├── env.ts, profiles.ts, feature-flags.ts, version.ts
+├── remote/                  # Hosted/self-hosted remote MCP gateway, session router, scopes
 ├── schemas/                 # Shared Zod schemas
 ├── server/                  # MCP server core
-│   ├── factory.ts, errors.ts
+│   ├── factory.ts, resources-prompts.ts
 │   └── transports/
-│       └── http.ts          # HTTP/Streamable HTTP transport
+│       ├── http.ts                    # HTTP/Streamable HTTP transport
+│       └── oauth-resource-metadata.ts
 ├── storage/                 # Node.js sqlite storage (cache, artifacts)
-├── tools/                   # 50 default MCP tool definitions (6 groups)
-│   ├── register.ts, registry.ts, types.ts
-│   ├── L0_diagnostics.ts, L1_schematic.ts, L1_bom.ts
-│   ├── L1_drc_erc.ts, L1_board.ts, L1_export.ts
-└── vendors/                 # Supplier API clients
-    ├── lcsc/, jlcpcb/, mouser/, digikey/
+├── tools/                   # Up to 115 profile-gated MCP tool definitions
+│   ├── register.ts, registry.ts, types.ts, transaction.ts
+│   ├── L0_diagnostics_core.ts, L0_diagnostics_api.ts
+│   ├── L1_schematic_read.ts, L1_schematic_write.ts
+│   ├── L1_bom_core.ts, L1_bom_sourcing.ts
+│   └── L1_drc_erc.ts, L1_board.ts, L1_export.ts, L1_pcb_constraints.ts, L1_pcb_write.ts
+├── vendors/                 # Supplier API clients (lcsc/, jlcpcb/, mouser/, digikey/)
+└── ...                      # circuit, pcb-layout, net-validation, power-tree, production-qa,
+                              # quote-gating, safety, observability, catalog, bom-quality,
+                              # export-manifest, live, easyeda-runtime
 
 easyeda-bridge-extension/    # EasyEDA Pro bridge extension workspace package
 ```
@@ -688,7 +945,7 @@ easyeda-bridge-extension/    # EasyEDA Pro bridge extension workspace package
 
 See [Security Architecture & Threat Model](docs/security-architecture.md) for the complete security reference, including deployment modes, authentication, tool safety controls, secrets management, safe defaults, supplier API security, threat scenarios, and deployment checklists.
 
-- **Production safety**: Validates config at startup — rejects non-loopback HTTP without OAuth, blocks dangerous features in production
+- **Network safety**: Validates config at startup in every environment — rejects non-loopback HTTP without complete OAuth and an explicit non-wildcard origin allowlist
 - **OAuth/JWKS**: Bearer token validation via JWKS endpoint for HTTP transport (see [OAuth section](docs/security-architecture.md#21-oauth-20--openid-connect-http-transport))
 - **Rate limiting**: Per-IP sliding window rate limiter on HTTP transport (default 100 req/min)
 - **Path traversal protection**: All file export paths validated against `ARTIFACT_DIR`
@@ -706,8 +963,14 @@ See [Security Architecture & Threat Model](docs/security-architecture.md) for th
 This repository uses automated workflows to manage dependencies and releases:
 
 - **Renovate**: Automatically scans and updates dependencies based on rules configured in [.github/renovate.json](.github/renovate.json). For details on PR policies and automerging, see [Repository Governance](docs/REPOSITORY_GOVERNANCE.md).
-- **Release Please**: Automatically bumps package versions, updates files (like `package.json`, `server.json`, `extension.json`), and generates `CHANGELOG.md` upon merging Release PRs. For the full release procedure and Conventional Commit conventions, see [Release Process](docs/RELEASE_PROCESS.md).
-- **Secure Publishing**: The release workflow builds all assets (including `easyeda-bridge-extension.eext`), publishes to the NPM registry with cryptographic provenance, and uploads assets directly to the GitHub release.
+- **Release Please**: Automates stable version bumps, release metadata, and `CHANGELOG.md`. Numbered `rc.N` candidates use the isolated prerelease path. See the [Release Policy](docs/RELEASE_POLICY.md) and [Release Process](docs/RELEASE_PROCESS.md).
+- **Secure Publishing**: The release workflow rebuilds and verifies all assets, publishes npm with provenance to channel-safe `latest` or `next` dist-tags, uploads the extension and SBOM to the matching GitHub Release, and keeps GHCR/MCP Registry promotion aligned with the selected channel.
+
+---
+
+## Support the project
+
+If this project helps you save time while working with EasyEDA Pro, BOM workflows, or MCP integrations, you can support ongoing development via the **Buy me a coffee** button at the top of this README.
 
 ---
 

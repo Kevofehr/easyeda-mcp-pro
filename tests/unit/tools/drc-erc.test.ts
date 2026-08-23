@@ -99,6 +99,28 @@ describe('DRC/ERC Tools', () => {
     });
   });
 
+  it('easyeda_drc_run derives passed=false from error violations when counts are omitted', async () => {
+    const tool = registry.get('easyeda_drc_run');
+    bridgeCall.mockResolvedValue({
+      violations: [
+        {
+          rule: 'Import Changes',
+          description: 'PCB and schematic netlist does not match.',
+          severity: 'error',
+        },
+      ],
+      totalViolations: 1,
+    });
+
+    const result = await tool?.handler(context, { projectId: 'proj-123' });
+    expect(result).toMatchObject({
+      total_violations: 1,
+      error_count: 1,
+      warning_count: 0,
+      passed: false,
+    });
+  });
+
   it('easyeda_drc_run handles empty violations', async () => {
     const tool = registry.get('easyeda_drc_run');
     expect(tool).toBeDefined();
@@ -170,6 +192,47 @@ describe('DRC/ERC Tools', () => {
     });
   });
 
+  it('easyeda_erc_run surfaces inferred floating pins alongside the native aggregate', async () => {
+    const tool = registry.get('easyeda_erc_run');
+    bridgeCall.mockResolvedValue({
+      violations: [{ rule: 'aggregate', description: '1 warning(s)', severity: 'warning' }],
+      totalViolations: 1,
+      errorCount: 0,
+      warningCount: 1,
+      inferredFloatingPins: [{ primitiveId: 'r1', designator: 'R1', pinNumber: '2' }],
+      detailSource: 'inferred_partial',
+    });
+
+    const result = await tool?.handler(context, { projectId: 'proj-123' });
+
+    expect(result?.inferred_floating_pins).toEqual([
+      { primitiveId: 'r1', designator: 'R1', pinNumber: '2' },
+    ]);
+    expect(result?.detail_source).toBe('inferred_partial');
+  });
+
+  it('easyeda_erc_run preserves native counts after no-connect filtering returns no inferred pins', async () => {
+    const tool = registry.get('easyeda_erc_run');
+    bridgeCall.mockResolvedValue({
+      violations: [{ description: '1 warning(s)', severity: 'warning' }],
+      totalViolations: 1,
+      errorCount: 0,
+      warningCount: 1,
+      inferredFloatingPins: [],
+      detailSource: 'native_aggregate_only',
+    });
+
+    const result = await tool?.handler(context, { projectId: 'proj-no-connect' });
+
+    expect(result).toMatchObject({
+      error_count: 0,
+      warning_count: 1,
+      total_violations: 1,
+      inferred_floating_pins: [],
+      detail_source: 'native_aggregate_only',
+    });
+  });
+
   it('easyeda_erc_run handles empty violations', async () => {
     const tool = registry.get('easyeda_erc_run');
     expect(tool).toBeDefined();
@@ -188,6 +251,235 @@ describe('DRC/ERC Tools', () => {
     expect(result?.error_count).toBe(0);
     expect(result?.warning_count).toBe(0);
     expect(result?.passed).toBe(true);
+  });
+
+  it('easyeda_semantic_erc_validate detects semantic ERC failures without bridge calls', async () => {
+    const tool = registry.get('easyeda_semantic_erc_validate');
+    expect(tool).toBeDefined();
+
+    const result = await tool?.handler(context, {
+      projectId: 'proj-semantic',
+      nets: [
+        {
+          id: 'pwr',
+          name: '3V3',
+          type: 'power',
+          nodes: [{ deviceRef: 'U1', pin: 'VDD' }],
+        },
+        {
+          id: 'gnd',
+          name: 'GND',
+          type: 'ground',
+          nodes: [{ deviceRef: 'U1', pin: 'GND' }],
+        },
+        {
+          id: 'sig',
+          name: 'BUS_DRV',
+          type: 'signal',
+          nodes: [
+            { deviceRef: 'U1', pin: 'OUT' },
+            { deviceRef: 'U2', pin: 'OUT' },
+          ],
+        },
+      ],
+      devices: [
+        { id: 'U1', ref: 'U1', pins: [{ pin: 'OUT', electricalType: 'output' }] },
+        { id: 'U2', ref: 'U2', pins: [{ pin: 'OUT', electricalType: 'output' }] },
+      ],
+    });
+
+    expect(bridgeCall).not.toHaveBeenCalled();
+    expect(result?.project_id).toBe('proj-semantic');
+    expect(result?.passed).toBe(false);
+    expect(result?.error_count).toBeGreaterThanOrEqual(1);
+    expect(result?.errors[0]).toMatchObject({
+      code: 'NET_OUTPUT_CONTENTION',
+      net_name: 'BUS_DRV',
+      severity: 'error',
+    });
+    expect(result?.errors[0].remediation_hint).toContain('push-pull outputs');
+  });
+
+  it('easyeda_semantic_erc_validate passes false-positive control with pull-up and decoupling', async () => {
+    const tool = registry.get('easyeda_semantic_erc_validate');
+    expect(tool).toBeDefined();
+
+    const result = await tool?.handler(context, {
+      projectId: 'proj-clean',
+      nets: [
+        {
+          id: 'pwr',
+          name: '3V3',
+          type: 'power',
+          nodes: [
+            { deviceRef: 'U1', pin: 'VDD' },
+            { deviceRef: 'R1', pin: '1' },
+            { deviceRef: 'C1', pin: '1' },
+          ],
+        },
+        {
+          id: 'gnd',
+          name: 'GND',
+          type: 'ground',
+          nodes: [
+            { deviceRef: 'U1', pin: 'GND' },
+            { deviceRef: 'C1', pin: '2' },
+          ],
+        },
+        {
+          id: 'sig',
+          name: 'I2C_SDA',
+          type: 'signal',
+          nodes: [
+            { deviceRef: 'U1', pin: 'SDA' },
+            { deviceRef: 'R1', pin: '2' },
+          ],
+        },
+      ],
+      devices: [
+        {
+          id: 'U1',
+          ref: 'U1',
+          requiresDecoupling: true,
+          pins: [
+            { pin: 'VDD', electricalType: 'power_input', required: true, expectedNetType: 'power' },
+            {
+              pin: 'GND',
+              electricalType: 'power_input',
+              required: true,
+              expectedNetType: 'ground',
+            },
+            { pin: 'SDA', electricalType: 'input' },
+          ],
+        },
+        {
+          id: 'R1',
+          ref: 'R1',
+          category: 'resistor',
+          pins: [
+            { pin: '1', electricalType: 'passive' },
+            { pin: '2', electricalType: 'passive' },
+          ],
+        },
+        {
+          id: 'C1',
+          ref: 'C1',
+          category: 'capacitor',
+          pins: [
+            { pin: '1', electricalType: 'passive' },
+            { pin: '2', electricalType: 'passive' },
+          ],
+        },
+      ],
+    });
+
+    expect(result?.passed).toBe(true);
+    expect(result?.error_count).toBe(0);
+    expect(
+      result?.warnings.filter((warning) =>
+        ['NET_FLOATING_INPUT', 'NET_MISSING_DECOUPLING'].includes(warning.code),
+      ),
+    ).toEqual([]);
+  });
+
+  it('easyeda_semantic_erc_auto extracts a live netlist and finds output contention', async () => {
+    const tool = registry.get('easyeda_semantic_erc_auto');
+    expect(tool).toBeDefined();
+
+    bridgeCall.mockImplementation(async (method: string, params?: unknown) => {
+      if (method === 'schematic.listNets') {
+        return [
+          {
+            netName: 'BUS_DRV',
+            nodes: [
+              { component: 'U1', pin: '1' },
+              { component: 'U2', pin: '7' },
+            ],
+          },
+        ];
+      }
+      if (method === 'schematic.listComponents') {
+        return {
+          items: [
+            { primitiveId: 'u1id', reference: 'U1' },
+            { primitiveId: 'u2id', reference: 'U2' },
+          ],
+        };
+      }
+      if (method === 'api.call') {
+        const p = params as { args: [string] };
+        const primitiveId = p.args[0];
+        // Live-verified LM358-style pin naming: "<channel>OUT" classifies as
+        // an active output driver via the name heuristic.
+        const pinName = primitiveId === 'u1id' ? '1OUT' : '2OUT';
+        const pinNumber = primitiveId === 'u1id' ? '1' : '7';
+        return { result: [{ pinNumber, pinName, x: 0, y: 0, rotation: 0, pinLength: 10 }] };
+      }
+      return null;
+    });
+
+    const result = await tool?.handler(context, { projectId: 'proj-auto' });
+
+    expect(result?.project_id).toBe('proj-auto');
+    expect(result?.inferred_net_count).toBe(1);
+    expect(result?.inferred_device_count).toBe(2);
+    expect(result?.passed).toBe(false);
+    expect(result?.errors).toContainEqual(
+      expect.objectContaining({ code: 'NET_OUTPUT_CONTENTION', net_name: 'BUS_DRV' }),
+    );
+  });
+
+  it('easyeda_semantic_erc_auto merges imported and native power aliases', async () => {
+    const tool = registry.get('easyeda_semantic_erc_auto');
+    expect(tool).toBeDefined();
+
+    bridgeCall.mockImplementation(async (method: string) => {
+      if (method === 'schematic.listNets') {
+        return [
+          { netName: 'SYMBOLS_GND', nodes: [{ component: 'U1', pin: '1' }] },
+          { netName: 'GND', nodes: [{ component: 'C1', pin: '2' }] },
+          { netName: 'SYMBOLS_+3V3', nodes: [{ component: 'U1', pin: '2' }] },
+        ];
+      }
+      if (method === 'schematic.listComponents') return { items: [] };
+      return null;
+    });
+
+    const result = await tool?.handler(context, { projectId: 'proj-imported' });
+
+    expect(result?.inferred_net_count).toBe(2);
+    expect(result?.not_available).toBeUndefined();
+  });
+
+  it('easyeda_semantic_erc_auto skips a component whose pins fail to load', async () => {
+    const tool = registry.get('easyeda_semantic_erc_auto');
+
+    bridgeCall.mockImplementation(async (method: string) => {
+      if (method === 'schematic.listNets') return [];
+      if (method === 'schematic.listComponents') {
+        return { items: [{ primitiveId: 'broken', reference: 'U1' }] };
+      }
+      if (method === 'api.call') throw new Error('pin fetch failed');
+      return null;
+    });
+
+    const result = await tool?.handler(context, { projectId: 'proj-partial' });
+
+    expect(result?.inferred_device_count).toBe(0);
+    expect(result?.inferred_net_count).toBe(0);
+  });
+
+  it('easyeda_semantic_erc_auto handles bridge failure gracefully', async () => {
+    const tool = registry.get('easyeda_semantic_erc_auto');
+
+    bridgeCall.mockRejectedValue(new Error('Bridge timeout'));
+
+    const result = await tool?.handler(context, { projectId: 'proj-auto' });
+
+    expect(result?.not_available).toBe(true);
+    expect(result?.project_id).toBe('proj-auto');
+    expect(result?.passed).toBe(false);
+    expect(result?.error).toBe('Bridge timeout');
   });
 
   it('easyeda_rule_check_summary returns combined DRC+ERC summary', async () => {
@@ -263,6 +555,75 @@ describe('DRC/ERC Tools', () => {
     expect(result?.overall_passed).toBe(true);
   });
 
+  it('easyeda_post_write_qa classifies manual DRC log lines without bridge calls', async () => {
+    const tool = registry.get('easyeda_post_write_qa');
+    expect(tool).toBeDefined();
+
+    const result = await tool?.handler(context, {
+      projectId: 'proj-qa',
+      useNativeChecks: false,
+      policy: 'circuit',
+      manualDrcMessages: ['Wire $1N4 has multiple net names: VCC VCC VCC'],
+    });
+
+    expect(bridgeCall).not.toHaveBeenCalled();
+    expect(result?.status).toBe('fail');
+    expect(result?.passed).toBe(false);
+    expect(result?.detail_source).toBe('manual');
+    expect(result?.categories.duplicate_net_names).toBe(1);
+  });
+
+  it('easyeda_post_write_qa uses native DRC/ERC and fails free networks for circuit policy', async () => {
+    const tool = registry.get('easyeda_post_write_qa');
+    expect(tool).toBeDefined();
+
+    bridgeCall
+      .mockResolvedValueOnce({
+        violations: [
+          {
+            description: 'The wire VCC $1N4 is a free network with no pins attached.',
+            severity: 'warning',
+            net: 'VCC',
+          },
+        ],
+        totalViolations: 1,
+        warningCount: 1,
+      })
+      .mockResolvedValueOnce({
+        violations: [],
+        totalViolations: 0,
+        errorCount: 0,
+        warningCount: 0,
+      });
+
+    const result = await tool?.handler(context, {
+      projectId: 'proj-qa',
+      policy: 'circuit',
+    });
+
+    expect(bridgeCall).toHaveBeenNthCalledWith(1, 'design.drc', { projectId: 'proj-qa' });
+    expect(bridgeCall).toHaveBeenNthCalledWith(2, 'design.erc', { projectId: 'proj-qa' });
+    expect(result?.status).toBe('fail');
+    expect(result?.detail_source).toBe('native');
+    expect(result?.categories.free_network_no_pins).toBe(1);
+    expect(result?.issues[0].fatal).toBe(true);
+  });
+
+  it('easyeda_post_write_qa reports inconclusive when native checks are unavailable', async () => {
+    const tool = registry.get('easyeda_post_write_qa');
+    expect(tool).toBeDefined();
+
+    bridgeCall.mockRejectedValue(new Error('native unavailable'));
+
+    const result = await tool?.handler(context, { projectId: 'proj-qa' });
+
+    expect(result?.status).toBe('inconclusive');
+    expect(result?.passed).toBe(false);
+    expect(result?.categories.native_drc_unavailable).toBe(1);
+    expect(result?.categories.native_erc_unavailable).toBe(1);
+    expect(result?.inconclusive_count).toBe(2);
+  });
+
   it('easyeda_drc_run handles bridge failure gracefully', async () => {
     const tool = registry.get('easyeda_drc_run');
     expect(tool).toBeDefined();
@@ -277,7 +638,7 @@ describe('DRC/ERC Tools', () => {
     expect(result?.total_violations).toBe(0);
     expect(result?.error_count).toBe(0);
     expect(result?.warning_count).toBe(0);
-    expect(result?.passed).toBe(false);
+    expect(result?.passed).toBeNull();
     expect(result?.error).toBe('Bridge timeout');
   });
 
@@ -295,8 +656,123 @@ describe('DRC/ERC Tools', () => {
     expect(result?.total_violations).toBe(0);
     expect(result?.error_count).toBe(0);
     expect(result?.warning_count).toBe(0);
-    expect(result?.passed).toBe(false);
+    expect(result?.passed).toBeNull();
     expect(result?.error).toBe('Bridge timeout');
+  });
+
+  it('easyeda_drc_run exposes the focused-PCB precondition as an actionable indeterminate result', async () => {
+    const tool = registry.get('easyeda_drc_run');
+    bridgeCall.mockRejectedValue(
+      Object.assign(new Error('Focus a PCB document, then retry design.drc.'), {
+        code: 'CONTEXT_UNAVAILABLE',
+        suggestion: 'Focus a PCB document, then retry design.drc.',
+      }),
+    );
+
+    const result = await tool?.handler(context, { projectId: 'proj-focus' });
+
+    expect(result).toMatchObject({
+      project_id: 'proj-focus',
+      passed: null,
+      not_available: true,
+      error: 'Focus a PCB document, then retry design.drc.',
+    });
+  });
+
+  it('easyeda_erc_run exposes the focused-schematic precondition as an actionable indeterminate result', async () => {
+    const tool = registry.get('easyeda_erc_run');
+    bridgeCall.mockRejectedValue(
+      Object.assign(new Error('Focus a schematic document, then retry design.erc.'), {
+        code: 'CONTEXT_UNAVAILABLE',
+        suggestion: 'Focus a schematic document, then retry design.erc.',
+      }),
+    );
+
+    const result = await tool?.handler(context, { projectId: 'proj-focus' });
+
+    expect(result).toMatchObject({
+      project_id: 'proj-focus',
+      passed: null,
+      not_available: true,
+      error: 'Focus a schematic document, then retry design.erc.',
+    });
+  });
+
+  it('easyeda_rule_check_summary preserves ERC when DRC is unavailable', async () => {
+    const tool = registry.get('easyeda_rule_check_summary');
+
+    bridgeCall.mockImplementation(async (method: string) => {
+      if (method === 'design.drc') throw new Error('PCB DRC unavailable');
+      if (method === 'design.erc') {
+        return { totalViolations: 1, errorCount: 0, warningCount: 1 };
+      }
+      return null;
+    });
+
+    const result = await tool?.handler(context, { projectId: 'proj-partial' });
+
+    expect(result?.not_available).toBeUndefined();
+    expect(result?.drc).toMatchObject({
+      total: 0,
+      errors: 0,
+      warnings: 0,
+      passed: null,
+      not_available: true,
+      error: 'PCB DRC unavailable',
+    });
+    expect(result?.erc).toMatchObject({ total: 1, errors: 0, warnings: 1, passed: true });
+    expect(result?.erc.not_available).toBeUndefined();
+    expect(result?.overall_passed).toBeNull();
+  });
+
+  it('easyeda_rule_check_summary normalizes sparse results and non-Error failures', async () => {
+    const tool = registry.get('easyeda_rule_check_summary');
+
+    bridgeCall.mockImplementation(async (method: string) => {
+      if (method === 'design.drc') return {};
+      if (method === 'design.erc') return Promise.reject('ERC transport unavailable');
+      return null;
+    });
+
+    const result = await tool?.handler(context, { projectId: 'proj-sparse' });
+
+    expect(result?.drc).toEqual({ total: 0, errors: 0, warnings: 0, passed: true });
+    expect(result?.erc).toEqual({
+      total: 0,
+      errors: 0,
+      warnings: 0,
+      passed: null,
+      not_available: true,
+      error: 'ERC transport unavailable',
+    });
+    expect(result?.overall_passed).toBeNull();
+    expect(result?.not_available).toBeUndefined();
+  });
+
+  it('easyeda_rule_check_summary preserves DRC when ERC is unavailable', async () => {
+    const tool = registry.get('easyeda_rule_check_summary');
+
+    bridgeCall.mockImplementation(async (method: string) => {
+      if (method === 'design.drc') {
+        return { totalViolations: 2, errorCount: 1, warningCount: 1 };
+      }
+      if (method === 'design.erc') throw new Error('Schematic ERC unavailable');
+      return null;
+    });
+
+    const result = await tool?.handler(context, { projectId: 'proj-partial' });
+
+    expect(result?.not_available).toBeUndefined();
+    expect(result?.drc).toMatchObject({ total: 2, errors: 1, warnings: 1, passed: false });
+    expect(result?.erc).toMatchObject({
+      total: 0,
+      errors: 0,
+      warnings: 0,
+      passed: null,
+      not_available: true,
+      error: 'Schematic ERC unavailable',
+    });
+    expect(result?.overall_passed).toBeNull();
   });
 
   it('easyeda_rule_check_summary handles bridge failure gracefully', async () => {
@@ -309,9 +785,21 @@ describe('DRC/ERC Tools', () => {
 
     expect(result?.not_available).toBe(true);
     expect(result?.project_id).toBe('proj-123');
-    expect(result?.drc).toMatchObject({ total: 0, errors: 0, warnings: 0, passed: false });
-    expect(result?.erc).toMatchObject({ total: 0, errors: 0, warnings: 0, passed: false });
-    expect(result?.overall_passed).toBe(false);
+    expect(result?.drc).toMatchObject({
+      total: 0,
+      errors: 0,
+      warnings: 0,
+      passed: null,
+      not_available: true,
+    });
+    expect(result?.erc).toMatchObject({
+      total: 0,
+      errors: 0,
+      warnings: 0,
+      passed: null,
+      not_available: true,
+    });
+    expect(result?.overall_passed).toBeNull();
     expect(result?.error).toBe('Bridge timeout');
   });
 });

@@ -2,6 +2,46 @@
 
 All configuration is managed using environment variables. When running locally from source, you can define them in a `.env` file in the root directory. When running via `npx`, they are passed as environment variables in your client config JSON.
 
+## Boolean literals
+
+Boolean environment variables accept only `true`, `false`, `1`, or `0`. Text matching is case-insensitive and surrounding whitespace is ignored. Do not use `yes` / `no`, `on` / `off`, `enabled` / `disabled`, or an empty value; unsupported literals and typos stop startup with a validation error naming the variable. Leave a variable unset to use its documented default. Native boolean values remain supported for programmatic configuration and tests.
+
+---
+
+## Storage paths
+
+`DATA_DIR` is the base for writable local state. When it is unset, the server uses `~/.easyeda-mcp-pro`. The server resolves `DATA_DIR` first and derives any unset subordinate paths from it:
+
+| Variable       | Derived default                     |
+| -------------- | ----------------------------------- |
+| `SQLITE_PATH`  | `<DATA_DIR>/easyeda-mcp-pro.sqlite` |
+| `ARTIFACT_DIR` | `<DATA_DIR>/artifacts`              |
+| `CACHE_DIR`    | `<DATA_DIR>/cache`                  |
+
+Setting only the base directory relocates all three defaults:
+
+```ini
+DATA_DIR=/srv/easyeda-mcp-pro
+```
+
+This resolves the database to `/srv/easyeda-mcp-pro/easyeda-mcp-pro.sqlite`, artifacts to `/srv/easyeda-mcp-pro/artifacts`, and cache files to `/srv/easyeda-mcp-pro/cache`. Native separators are used on Windows.
+
+Each subordinate variable remains an independent override. Leave it unset to inherit from `DATA_DIR`, or set it explicitly when one path needs a different location. Explicit relative values remain relative to the MCP process working directory and are not converted to absolute paths. Changing path settings does not move existing data; migrate or remove old state manually after stopping the server.
+
+---
+
+## Sourcing request controls
+
+The sourcing facade applies shared controls before calling LCSC, Mouser, DigiKey, or other supported vendor paths:
+
+| Variable                         | Default | Behavior                                                             |
+| -------------------------------- | ------- | -------------------------------------------------------------------- |
+| `KEYLESS_SOURCING_ENABLED`       | `true`  | Allows supported public fallbacks when vendor credentials are absent |
+| `SOURCING_CACHE_TTL_SECONDS`     | `21600` | Reuses cached sourcing responses for six hours; `0` disables reuse   |
+| `VENDOR_MIN_REQUEST_INTERVAL_MS` | `150`   | Enforces a minimum delay between requests to the same vendor         |
+
+These controls do not enable ordering and do not bypass vendor authentication requirements. Disable keyless sourcing when deployment policy requires credentialed vendor access only.
+
 ---
 
 ## Tool Profiles
@@ -27,6 +67,30 @@ Configure this in your client environment configuration:
   "TOOL_SCOPES": "schematic:read,bom:read,checks:read,export:write"
 }
 ```
+
+---
+
+## Feature maturity and reserved settings
+
+A variable being accepted by the environment schema does not necessarily mean that a runtime
+feature is active. `easyeda_get_feature_flags`, `easyeda_get_capabilities`, and
+`easyeda_get_server_config` expose a maturity report with separate `configured` and `effective`
+values.
+
+| Settings                                                                                               | Maturity     | Runtime effect                                                                                                      |
+| ------------------------------------------------------------------------------------------------------ | ------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `MCP_TASKS_ENABLED`                                                                                    | Reserved     | Parsed for compatibility; the server does not advertise or execute MCP Tasks.                                       |
+| `MCP_APPS_ENABLED`                                                                                     | Reserved     | Parsed for compatibility; no Apps UI/resource runtime is registered.                                                |
+| `MCP_V2_EXPERIMENTAL`                                                                                  | Reserved     | Does not change protocol negotiation. See [MCP protocol compatibility](../reference/mcp-protocol-compatibility.md). |
+| `AI_PROVIDER`, `AI_MODEL`, `AI_API_KEY`, `AI_MAX_TOKENS`, `AI_TIMEOUT_MS`, `AI_ALLOW_DESIGN_MUTATIONS` | Reserved     | No in-process AI provider is called and no AI design mutation is enabled.                                           |
+| `OTEL_ENABLED`, `OTEL_SERVICE_NAME`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `TRACE_SAMPLE_RATE`                | Reserved     | No OTLP exporter is started; local structured metrics remain available.                                             |
+| `MCP_BRIDGE_BACKEND=remote_relay`                                                                      | Experimental | Activates the implemented paired relay path with documented non-Beta limitations.                                   |
+| Raw execution gates                                                                                    | Experimental | Effective only when both explicit development-only gates are enabled; refused in production.                        |
+| OAuth/JWKS settings                                                                                    | Implemented  | Enforced for non-loopback HTTP and used for token validation.                                                       |
+
+Reserved settings report `effective: false` even when configured. They are retained so future
+implementation can avoid unnecessary configuration churn, but must not be presented as shipped
+product capabilities.
 
 ---
 
@@ -70,17 +134,19 @@ HTTP_RATE_LIMIT_MAX=100
 
 Loopback HTTP deployments validate browser `Origin` headers and only accept loopback `Host` headers. For browser tooling running on a local development port, use the default loopback host or set `CORS_ORIGIN` / `ALLOWED_ORIGINS` explicitly.
 
-### Production Security for HTTP
+### Remote Security for HTTP
 
-For remote HTTP deployments, OAuth 2.0 validation can be enforced:
+For every non-loopback HTTP deployment, OAuth 2.0 validation is mandatory regardless of `NODE_ENV`:
 
 ```ini
 OAUTH_ENABLED=true
 OAUTH_ISSUER=https://your-identity-provider.com
 OAUTH_JWKS_URI=https://your-identity-provider.com/.well-known/jwks.json
+OAUTH_AUDIENCE=easyeda-mcp-pro
+ALLOWED_ORIGINS=https://your-client.example.com
 ```
 
-_Note: Non-loopback `HTTP_HOST` (e.g., `0.0.0.0`) without OAuth enabled is rejected at startup for security._
+_Note: Non-loopback `HTTP_HOST` (e.g., `0.0.0.0`) without complete OAuth settings is rejected at startup in development, test, and production. `ALLOWED_ORIGINS=*` is also rejected because CORS does not authenticate non-browser clients._
 
 ### Raw execution quarantine
 

@@ -1,6 +1,15 @@
 import { z } from 'zod';
 import { type ToolDefinition, type ToolContext } from './types.js';
 import { type EnvConfig } from '../config/env.js';
+import {
+  deletePrimitiveExact,
+  getGlobalTransactionManager,
+  getPrimitiveSnapshot,
+  listPrimitiveIds,
+  primitiveExists,
+  recreatePrimitiveSnapshot,
+  TransactionError,
+} from '../transactions/index.js';
 
 const deviceItemSchema = z
   .object({
@@ -9,16 +18,400 @@ const deviceItemSchema = z
   })
   .passthrough();
 
-const placeComponentInputSchema = z.object({
-  deviceItem: deviceItemSchema,
-  x: z.number(),
-  y: z.number(),
-  subPartName: z.string().optional(),
-  rotation: z.number().optional(),
-  mirror: z.boolean().optional(),
-  addIntoBom: z.boolean().optional(),
-  addIntoPcb: z.boolean().optional(),
-  confirmWrite: z.literal(true),
+type SchematicComponentSnapshot = Record<string, unknown>;
+
+type PlacementGuardResult = {
+  collision_checked: boolean;
+  collision_radius: number;
+  warnings: string[];
+  nearby_components: SchematicComponentSnapshot[];
+};
+
+function schematicWriteNumberField(
+  item: SchematicComponentSnapshot,
+  keys: readonly string[],
+): number | undefined {
+  for (const key of keys) {
+    const value = item[key];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string') {
+      const parsed = Number(value.trim());
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return undefined;
+}
+
+function schematicWriteComponentPoint(
+  item: SchematicComponentSnapshot,
+): { x: number; y: number } | undefined {
+  const directX = schematicWriteNumberField(item, ['x', 'X', 'canvasX', 'positionX']);
+  const directY = schematicWriteNumberField(item, ['y', 'Y', 'canvasY', 'positionY']);
+  if (directX !== undefined && directY !== undefined) return { x: directX, y: directY };
+
+  const position = item.position;
+  if (position && typeof position === 'object' && !Array.isArray(position)) {
+    const pos = position as SchematicComponentSnapshot;
+    const x = schematicWriteNumberField(pos, ['x', 'X']);
+    const y = schematicWriteNumberField(pos, ['y', 'Y']);
+    if (x !== undefined && y !== undefined) return { x, y };
+  }
+
+  const bbox = item.bbox ?? item.boundingBox;
+  if (bbox && typeof bbox === 'object' && !Array.isArray(bbox)) {
+    const box = bbox as SchematicComponentSnapshot;
+    const x1 = schematicWriteNumberField(box, ['x', 'left', 'minX']);
+    const y1 = schematicWriteNumberField(box, ['y', 'top', 'minY']);
+    const x2 = schematicWriteNumberField(box, ['x2', 'right', 'maxX']);
+    const y2 = schematicWriteNumberField(box, ['y2', 'bottom', 'maxY']);
+    if (x1 !== undefined && y1 !== undefined && x2 !== undefined && y2 !== undefined) {
+      return { x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
+    }
+  }
+
+  return undefined;
+}
+
+function schematicWritePlacementGuard(
+  components: SchematicComponentSnapshot[] | undefined,
+  x: number,
+  y: number,
+  collisionRadius: number,
+): PlacementGuardResult {
+  const nearby: SchematicComponentSnapshot[] = [];
+  for (const component of components ?? []) {
+    const point = schematicWriteComponentPoint(component);
+    if (!point) continue;
+    const distance = Math.hypot(point.x - x, point.y - y);
+    if (distance <= collisionRadius) nearby.push({ ...component, distance });
+  }
+
+  return {
+    collision_checked: true,
+    collision_radius: collisionRadius,
+    warnings:
+      nearby.length > 0
+        ? [
+            `Placement is within ${collisionRadius} schematic units of ${nearby.length} existing component(s). Review before applying.`,
+          ]
+        : [],
+    nearby_components: nearby,
+  };
+}
+
+async function readSchematicComponentsForVerification(
+  ctx: ToolContext,
+): Promise<SchematicComponentSnapshot[] | undefined> {
+  try {
+    const result = await ctx.bridge.call<
+      { projectId: string; limit: number; offset: number },
+      { total?: number; items?: SchematicComponentSnapshot[] } | SchematicComponentSnapshot[]
+    >('schematic.listComponents', {
+      projectId: 'active',
+      limit: 500,
+      offset: 0,
+    });
+    // The bridge returns { total, items }, not a bare array — accept both
+    // shapes defensively (a bare-array response previously made this always
+    // return undefined, silently disabling the collision guard and the
+    // before/after component-count diff in verifyAfterWrite).
+    if (Array.isArray(result)) return result;
+    if (result && Array.isArray(result.items)) return result.items;
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Loose match for "was this placement attempted right before the bridge call failed" —
+ *  used only to decide whether a timeout/error is worth reconciling against real state. */
+function looksLikeTimeoutOrUnconfirmed(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return /timed out|timeout/i.test(err.message);
+}
+
+/**
+ * After a placeComponent call errors (typically a timeout), check whether the
+ * write actually landed anyway before reporting failure — the EasyEDA-side
+ * operation can complete after the bridge's own timeout fires, and blindly
+ * reporting failure invites the caller to retry, creating a duplicate
+ * component under a second designator (see easyeda-workflow skill's
+ * "known write-safety caveats"). Matches on device identity + placement
+ * coordinates within `collisionRadius` against the current component list.
+ */
+function findMatchingPlacedComponent(
+  components: SchematicComponentSnapshot[] | undefined,
+  deviceItem: { uuid: string; libraryUuid: string },
+  x: number,
+  y: number,
+  toleranceRadius: number,
+): SchematicComponentSnapshot | undefined {
+  for (const component of components ?? []) {
+    if (component.deviceUuid !== deviceItem.uuid) continue;
+    const point = schematicWriteComponentPoint(component);
+    if (!point) continue;
+    if (Math.hypot(point.x - x, point.y - y) <= toleranceRadius) return component;
+  }
+  return undefined;
+}
+
+const STANDALONE_CREATE_RECONCILE_ATTEMPTS = 30;
+const STANDALONE_CREATE_RECONCILE_FAILURE_ATTEMPTS = 10;
+const STANDALONE_CREATE_RECONCILE_DELAY_MS = 100;
+const RECREATABLE_TRANSACTION_DELETE_KINDS = new Set([
+  'wire',
+  'text',
+  'rectangle',
+  'circle',
+  'polygon',
+]);
+
+const projectTransactionInputFields = {
+  projectId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('Required when transactionId is supplied; must match the transaction document.'),
+  transactionId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('Optional snapshot-backed project transaction ID.'),
+};
+
+type ProjectTransactionInput = {
+  projectId?: string;
+  transactionId?: string;
+};
+
+function requireProjectIdForTransaction(
+  value: ProjectTransactionInput,
+  context: z.RefinementCtx<ProjectTransactionInput>,
+) {
+  if (value.transactionId && !value.projectId) {
+    context.addIssue({
+      code: 'custom',
+      path: ['projectId'],
+      message: 'projectId is required when transactionId is supplied',
+      input: value,
+    });
+  }
+}
+
+const transactionOperationStateSchema = z.enum([
+  'pending',
+  'applied',
+  'rolled-back',
+  'cancelled',
+  'failed',
+]);
+
+function transactionFailure(err: unknown) {
+  const transactionError = err instanceof TransactionError ? err : undefined;
+  return {
+    success: false as const,
+    error_code: transactionError?.code,
+    error: err instanceof Error ? err.message : String(err),
+    details: transactionError?.details,
+  };
+}
+
+function bridgeFailure(err: unknown) {
+  const record = err && typeof err === 'object' ? (err as Record<string, unknown>) : undefined;
+  const data =
+    record?.data && typeof record.data === 'object' && !Array.isArray(record.data)
+      ? (record.data as Record<string, unknown>)
+      : undefined;
+  return {
+    success: false as const,
+    error_code: typeof record?.code === 'string' ? record.code : undefined,
+    error: err instanceof Error ? err.message : String(err),
+    details: data,
+  };
+}
+
+function transactionManagerForProject(transactionId: string, projectId: string | undefined) {
+  const manager = getGlobalTransactionManager();
+  const transaction = manager.get(transactionId);
+  if (transaction.documentId !== projectId) {
+    throw new TransactionError(
+      'TRANSACTION_INVALID_STATE',
+      `Transaction ${transactionId} belongs to ${transaction.documentId}, not ${projectId}`,
+      { transactionDocumentId: transaction.documentId, requestedProjectId: projectId },
+    );
+  }
+  return manager;
+}
+
+async function pollStandaloneAddedPrimitiveIds(
+  ctx: ToolContext,
+  primitiveKind: string,
+  beforeIds: ReadonlySet<string>,
+  attempts: number,
+): Promise<string[]> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const afterIds = await listPrimitiveIds(ctx.bridge, primitiveKind);
+    const added = afterIds.filter((id) => !beforeIds.has(id));
+    if (added.length > 0) return added;
+    if (attempt + 1 < attempts) {
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, STANDALONE_CREATE_RECONCILE_DELAY_MS),
+      );
+    }
+  }
+  return [];
+}
+
+async function placeComponentInTransaction(
+  ctx: ToolContext,
+  p: z.infer<typeof placeComponentInputSchema>,
+) {
+  if (!p.transactionId || !p.projectId) throw new Error('Transactional placement requires IDs');
+  const manager = transactionManagerForProject(p.transactionId, p.projectId);
+  const beforeIds = new Set(await listPrimitiveIds(ctx.bridge, 'component'));
+  return manager.runCreate(p.transactionId, `component:${p.deviceItem.uuid}`, {
+    apply: async () => {
+      const result = await ctx.bridge.call('schematic.placeComponent', {
+        deviceItem: p.deviceItem,
+        x: p.x,
+        y: p.y,
+        subPartName: p.subPartName,
+        rotation: p.rotation,
+        mirror: p.mirror,
+        addIntoBom: p.addIntoBom,
+        addIntoPcb: p.addIntoPcb,
+      });
+      const added = await pollStandaloneAddedPrimitiveIds(
+        ctx,
+        'component',
+        beforeIds,
+        STANDALONE_CREATE_RECONCILE_ATTEMPTS,
+      );
+      if (added.length > 1) {
+        throw new Error(
+          `Create reconciliation is ambiguous: ${added.length} new component primitives`,
+        );
+      }
+      const targetId = added[0];
+      if (!targetId)
+        throw new Error('Create result did not expose a unique component primitive ID');
+      return { result, targetId };
+    },
+    getSnapshot: async (targetId) => getPrimitiveSnapshot(ctx.bridge, targetId, 'component'),
+    remove: async (targetId) => deletePrimitiveExact(ctx.bridge, targetId),
+    exists: async (targetId) => primitiveExists(ctx.bridge, targetId, 'component'),
+    reconcile: async () => {
+      const added = await pollStandaloneAddedPrimitiveIds(
+        ctx,
+        'component',
+        beforeIds,
+        STANDALONE_CREATE_RECONCILE_FAILURE_ATTEMPTS,
+      );
+      if (added.length === 0) return { status: 'none' as const };
+      if (added.length === 1) return { status: 'created' as const, targetId: added[0] };
+      return { status: 'ambiguous' as const };
+    },
+  });
+}
+
+const placeComponentInputSchema = z
+  .object({
+    deviceItem: deviceItemSchema,
+    x: z.number(),
+    y: z.number(),
+    subPartName: z.string().optional(),
+    rotation: z.number().optional(),
+    mirror: z.boolean().optional(),
+    addIntoBom: z.boolean().optional(),
+    addIntoPcb: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    verifyAfterWrite: z.boolean().optional(),
+    checkPlacementCollision: z.boolean().optional(),
+    collisionRadius: z.number().positive().optional(),
+    ...projectTransactionInputFields,
+    confirmWrite: z
+      .literal(true)
+      .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
+  })
+  .superRefine(requireProjectIdForTransaction);
+
+type PlaceComponentParams = z.infer<typeof placeComponentInputSchema>;
+
+async function applyPlaceComponentWrite(ctx: ToolContext, p: PlaceComponentParams) {
+  if (p.transactionId && p.projectId) {
+    const applied = await placeComponentInTransaction(ctx, p);
+    return {
+      result: applied.result,
+      transaction: {
+        id: p.transactionId,
+        operation_id: applied.operation.id,
+        operation_state: applied.operation.state,
+        target_id: applied.targetId,
+        before_hash: applied.operation.beforeHash,
+        after_hash: applied.operation.afterHash,
+      },
+    };
+  }
+
+  const result = await ctx.bridge.call('schematic.placeComponent', {
+    deviceItem: p.deviceItem,
+    x: p.x,
+    y: p.y,
+    subPartName: p.subPartName,
+    rotation: p.rotation,
+    mirror: p.mirror,
+    addIntoBom: p.addIntoBom,
+    addIntoPcb: p.addIntoPcb,
+  });
+  return { result, transaction: undefined };
+}
+
+async function handlePlaceComponentError(ctx: ToolContext, p: PlaceComponentParams, err: unknown) {
+  if (err instanceof TransactionError) return transactionFailure(err);
+  if (!looksLikeTimeoutOrUnconfirmed(err)) return bridgeFailure(err);
+
+  const afterComponents = await readSchematicComponentsForVerification(ctx);
+  const match = findMatchingPlacedComponent(
+    afterComponents,
+    p.deviceItem,
+    p.x,
+    p.y,
+    p.collisionRadius ?? 25,
+  );
+  if (match) {
+    return {
+      success: true,
+      component: match,
+      reconciled: true,
+      warning:
+        `Bridge call errored ("${err instanceof Error ? err.message : String(err)}") but ` +
+        `a matching component (primitiveId "${String(match.primitiveId ?? '')}") was found ` +
+        'on the sheet afterward — the placement likely succeeded despite the error. Do not retry this placement.',
+    };
+  }
+  return {
+    success: false,
+    unconfirmed: true,
+    error: err instanceof Error ? err.message : String(err),
+    warning:
+      'This looks like a timeout, not a confirmed failure. No matching component was ' +
+      'found on re-check, but the write may still be landing. Verify with ' +
+      'schematic_components/schematic_nets before retrying — retrying an unconfirmed ' +
+      'placement risks creating a duplicate.',
+  };
+}
+
+const setPinNoConnectInputSchema = z.object({
+  projectId: z.string().min(1).describe('The project/schematic ID'),
+  primitiveId: z.string().min(1).describe('The component primitive ID'),
+  pinNumber: z.string().min(1).describe('The exact component pin number'),
+  noConnected: z
+    .boolean()
+    .default(true)
+    .describe('true places the native No Connect marker; false removes it'),
+  confirmWrite: z
+    .literal(true)
+    .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
 });
 
 const addWireInputSchema = z.object({
@@ -32,19 +425,151 @@ const addWireInputSchema = z.object({
   color: z.string().optional(),
   lineWidth: z.number().optional(),
   lineType: z.string().optional(),
-  confirmWrite: z.literal(true),
+  confirmWrite: z
+    .literal(true)
+    .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
 });
 
-const deletePrimitiveInputSchema = z.object({
-  primitiveIds: z.array(z.string()),
-  confirmWrite: z.literal(true),
+const textAlignModeSchema = z.number().int().min(1).max(9);
+
+const addTextInputSchema = z.object({
+  x: z.number(),
+  y: z.number(),
+  content: z.string().min(1),
+  rotation: z.number().optional(),
+  color: z.string().optional(),
+  fontName: z.string().optional(),
+  fontSize: z.number().positive().optional(),
+  bold: z.boolean().optional(),
+  italic: z.boolean().optional(),
+  underline: z.boolean().optional(),
+  alignMode: textAlignModeSchema.optional(),
+  confirmWrite: z
+    .literal(true)
+    .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
 });
 
-const modifyPrimitiveInputSchema = z.object({
-  primitiveId: z.string(),
-  property: z.record(z.string(), z.unknown()),
-  confirmWrite: z.literal(true),
+const addRectangleInputSchema = z.object({
+  x: z.number().describe('Top-left X coordinate'),
+  y: z.number().describe('Top-left Y coordinate'),
+  width: z.number().positive(),
+  height: z.number().positive(),
+  cornerRadius: z.number().nonnegative().optional(),
+  rotation: z.number().optional(),
+  color: z.string().optional().describe('Border/line color, hex string (e.g. "#FF0000")'),
+  fillColor: z.string().optional().describe('Fill color, hex string, or "none" for unfilled'),
+  lineWidth: z.number().positive().optional(),
+  lineType: z.number().int().nonnegative().optional(),
+  fillStyle: z.string().optional(),
+  confirmWrite: z
+    .literal(true)
+    .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
 });
+
+const addCircleInputSchema = z.object({
+  centerX: z.number(),
+  centerY: z.number(),
+  radius: z.number().positive(),
+  color: z.string().optional(),
+  fillColor: z.string().optional().describe('Fill color, hex string, or "none" for unfilled'),
+  lineWidth: z.number().positive().optional(),
+  lineType: z.number().int().nonnegative().optional(),
+  fillStyle: z.string().optional(),
+  confirmWrite: z
+    .literal(true)
+    .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
+});
+
+const addPolygonInputSchema = z.object({
+  points: z.array(z.object({ x: z.number(), y: z.number() })).min(3),
+  color: z.string().optional(),
+  fillColor: z.string().optional().describe('Fill color, hex string, or "none" for unfilled'),
+  lineWidth: z.number().positive().optional(),
+  lineType: z.number().int().nonnegative().optional(),
+  confirmWrite: z
+    .literal(true)
+    .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
+});
+
+const deletePrimitiveInputSchema = z
+  .object({
+    primitiveIds: z.array(z.string().min(1)).min(1),
+    ...projectTransactionInputFields,
+    confirmWrite: z
+      .literal(true)
+      .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
+  })
+  .superRefine(requireProjectIdForTransaction);
+
+const modifyPrimitiveInputSchema = z
+  .object({
+    primitiveId: z.string(),
+    property: z.record(z.string(), z.unknown()),
+    ...projectTransactionInputFields,
+    confirmWrite: z
+      .literal(true)
+      .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
+  })
+  .superRefine((value, context) => {
+    requireProjectIdForTransaction(value, context);
+    if (
+      Object.hasOwn(value.property, 'alignMode') &&
+      !textAlignModeSchema.safeParse(value.property.alignMode).success
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['property', 'alignMode'],
+        message: 'alignMode must be an integer from 1 through 9',
+      });
+    }
+  });
+
+async function deletePrimitivesInTransaction(
+  ctx: ToolContext,
+  projectId: string,
+  transactionId: string,
+  primitiveIds: string[],
+) {
+  const manager = transactionManagerForProject(transactionId, projectId);
+  const snapshots = new Map<string, Awaited<ReturnType<typeof getPrimitiveSnapshot>>>();
+  for (const primitiveId of primitiveIds) {
+    const snapshot = await getPrimitiveSnapshot(ctx.bridge, primitiveId);
+    const primitiveKind = snapshot.primitiveKind;
+    if (
+      typeof primitiveKind !== 'string' ||
+      !RECREATABLE_TRANSACTION_DELETE_KINDS.has(primitiveKind)
+    ) {
+      throw new TransactionError(
+        'TRANSACTION_INVALID_STATE',
+        `Transactional delete rollback is not supported for ${String(primitiveKind)} primitive ${primitiveId}`,
+        {
+          primitiveId,
+          primitiveKind,
+          supportedKinds: Array.from(RECREATABLE_TRANSACTION_DELETE_KINDS),
+        },
+      );
+    }
+    snapshots.set(primitiveId, snapshot);
+  }
+
+  const operations = [];
+  for (const primitiveId of primitiveIds) {
+    const snapshot = snapshots.get(primitiveId);
+    if (!snapshot) throw new Error(`Missing preflight snapshot for ${primitiveId}`);
+    const primitiveKind = snapshot.primitiveKind as string;
+    const applied = await manager.runDelete(transactionId, primitiveId, {
+      getSnapshot: async () => structuredClone(snapshot),
+      apply: async () => deletePrimitiveExact(ctx.bridge, primitiveId),
+      exists: async () => primitiveExists(ctx.bridge, primitiveId, primitiveKind),
+      recreate: async (beforeSnapshot) => {
+        const recreated = await recreatePrimitiveSnapshot(ctx.bridge, beforeSnapshot);
+        return { targetId: recreated.primitiveId, snapshot: recreated.snapshot };
+      },
+    });
+    operations.push(applied.operation);
+  }
+  return operations;
+}
 
 function registerSchematicWriteTools(
   registry: { register: (def: ToolDefinition) => void },
@@ -53,7 +578,11 @@ function registerSchematicWriteTools(
   registry.register({
     name: 'easyeda_schematic_place_component',
     title: 'Place schematic component',
-    description: 'Place a library component/device on the active schematic sheet.',
+    description:
+      'Place a searched library device on the active schematic. Use deviceItem from ' +
+      'schematic_search_device; project-local identities from schematic_components are invalid. ' +
+      'On timeout inspect reconciled/unconfirmed before retrying. projectId + transactionId enables ' +
+      'rollback; without transactionId the write is standalone.',
     profile: 'core',
     evidence: ['official-docs'],
     risk: 'medium',
@@ -68,30 +597,97 @@ function registerSchematicWriteTools(
     outputSchema: z.object({
       success: z.boolean(),
       component: z.unknown().optional(),
+      dry_run: z.boolean().optional(),
+      placement_guard: z.unknown().optional(),
+      verification: z.unknown().optional(),
+      /** True when a bridge error (typically a timeout) was reconciled by finding a matching
+       *  component already on the sheet — the placement likely succeeded despite the error. */
+      reconciled: z.boolean().optional(),
+      /** True when an error looked like a timeout but no matching component was found on
+       *  re-check — genuinely unknown whether the write landed; do not assume either way. */
+      unconfirmed: z.boolean().optional(),
+      transaction: z
+        .object({
+          id: z.string(),
+          operation_id: z.string(),
+          operation_state: transactionOperationStateSchema,
+          target_id: z.string(),
+          before_hash: z.string().optional(),
+          after_hash: z.string().optional(),
+        })
+        .optional(),
+      warning: z.string().optional(),
+      error_code: z.string().optional(),
       error: z.string().optional(),
+      details: z.record(z.string(), z.unknown()).optional(),
     }),
     handler: async (ctx: ToolContext, params: unknown) => {
       const p = placeComponentInputSchema.parse(params);
       try {
-        const result = await ctx.bridge.call('schematic.placeComponent', {
-          deviceItem: p.deviceItem,
-          x: p.x,
-          y: p.y,
-          subPartName: p.subPartName,
-          rotation: p.rotation,
-          mirror: p.mirror,
-          addIntoBom: p.addIntoBom,
-          addIntoPcb: p.addIntoPcb,
-        });
+        const shouldReadBefore = Boolean(
+          p.dryRun || p.verifyAfterWrite || p.checkPlacementCollision,
+        );
+        const beforeComponents = shouldReadBefore
+          ? await readSchematicComponentsForVerification(ctx)
+          : undefined;
+        const collisionRadius = p.collisionRadius ?? 25;
+        const placementGuard = p.checkPlacementCollision
+          ? schematicWritePlacementGuard(beforeComponents, p.x, p.y, collisionRadius)
+          : undefined;
+
+        if (p.dryRun) {
+          return {
+            success: true,
+            dry_run: true,
+            placement_guard: placementGuard,
+            verification: {
+              applied: false,
+              before_component_count: beforeComponents?.length,
+              requested: {
+                deviceItem: p.deviceItem,
+                x: p.x,
+                y: p.y,
+                rotation: p.rotation,
+                mirror: p.mirror,
+                subPartName: p.subPartName,
+              },
+            },
+          };
+        }
+
+        const { result, transaction } = await applyPlaceComponentWrite(ctx, p);
+
+        if (!p.verifyAfterWrite && !placementGuard) {
+          return {
+            success: true,
+            component: result,
+            transaction,
+          };
+        }
+
+        const afterComponents = p.verifyAfterWrite
+          ? await readSchematicComponentsForVerification(ctx)
+          : undefined;
         return {
           success: true,
           component: result,
+          transaction,
+          placement_guard: placementGuard,
+          verification: p.verifyAfterWrite
+            ? {
+                applied: true,
+                before_component_count: beforeComponents?.length,
+                after_component_count: afterComponents?.length,
+                component_count_delta:
+                  beforeComponents && afterComponents
+                    ? afterComponents.length - beforeComponents.length
+                    : undefined,
+                readback_available: Boolean(afterComponents),
+              }
+            : undefined,
         };
       } catch (err) {
-        return {
-          success: false,
-          error: err instanceof Error ? err.message : String(err),
-        };
+        return handlePlaceComponentError(ctx, p, err);
       }
     },
   });
@@ -99,7 +695,11 @@ function registerSchematicWriteTools(
   registry.register({
     name: 'easyeda_schematic_add_wire',
     title: 'Add schematic wire',
-    description: 'Add a wire segment connecting schematic coordinates/pins.',
+    description:
+      'Add a wire connecting schematic coordinates/pins — real native connectivity. Same ' +
+      '`netName` connects pins globally: separate stubs sharing one name merge into one net (no ' +
+      "label needed). NET_COLLISION guards touched points against a foreign net's wire, pin, or " +
+      'flag/port — not mid-segment crossings.',
     profile: 'core',
     evidence: ['official-docs'],
     risk: 'medium',
@@ -140,10 +740,185 @@ function registerSchematicWriteTools(
   });
 
   registry.register({
+    name: 'easyeda_schematic_add_text',
+    title: 'Add schematic text label',
+    description:
+      'Place free-standing text on the schematic sheet (section headers, notes, block labels) — ' +
+      'cosmetic/organizational, not a net label. color must be a hex string and fontName a real ' +
+      'font (e.g. "Arial") — untyped placeholders create nothing despite returning ok.',
+    profile: 'core',
+    evidence: ['runtime-probe'],
+    risk: 'medium',
+    confirmWrite: true,
+    group: 'schematic',
+    version: '1.0.0',
+    annotations: {
+      readOnlyHint: false,
+      idempotentHint: false,
+    },
+    inputSchema: addTextInputSchema,
+    outputSchema: z.object({
+      success: z.boolean(),
+      text: z.unknown().optional(),
+      error: z.string().optional(),
+    }),
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const p = addTextInputSchema.parse(params);
+      try {
+        const result = await ctx.bridge.call('schematic.addText', {
+          x: p.x,
+          y: p.y,
+          content: p.content,
+          rotation: p.rotation,
+          color: p.color,
+          fontName: p.fontName,
+          fontSize: p.fontSize,
+          bold: p.bold,
+          italic: p.italic,
+          underline: p.underline,
+          alignMode: p.alignMode,
+        });
+        return { success: true, text: result };
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  });
+
+  registry.register({
+    name: 'easyeda_schematic_add_rectangle',
+    title: 'Add schematic rectangle',
+    description:
+      'Draw a rectangle on the schematic sheet — section dividers/grouping boxes for organizing ' +
+      'a busy schematic into labeled functional blocks (pair with add_text for the title). ' +
+      'Cosmetic only. x/y is the top-left corner; fillColor "none" leaves it unfilled.',
+    profile: 'core',
+    evidence: ['runtime-probe'],
+    risk: 'medium',
+    confirmWrite: true,
+    group: 'schematic',
+    version: '1.0.0',
+    annotations: {
+      readOnlyHint: false,
+      idempotentHint: false,
+    },
+    inputSchema: addRectangleInputSchema,
+    outputSchema: z.object({
+      success: z.boolean(),
+      rectangle: z.unknown().optional(),
+      error: z.string().optional(),
+    }),
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const p = addRectangleInputSchema.parse(params);
+      try {
+        const result = await ctx.bridge.call('schematic.addRectangle', {
+          x: p.x,
+          y: p.y,
+          width: p.width,
+          height: p.height,
+          cornerRadius: p.cornerRadius,
+          rotation: p.rotation,
+          color: p.color,
+          fillColor: p.fillColor,
+          lineWidth: p.lineWidth,
+          lineType: p.lineType,
+          fillStyle: p.fillStyle,
+        });
+        return { success: true, rectangle: result };
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  });
+
+  registry.register({
+    name: 'easyeda_schematic_add_circle',
+    title: 'Add schematic circle',
+    description:
+      'Draw a circle on the schematic sheet — decorative marker or custom symbol element. ' +
+      'Cosmetic only, no electrical meaning. fillColor "none" leaves it unfilled.',
+    profile: 'core',
+    evidence: ['runtime-probe'],
+    risk: 'medium',
+    confirmWrite: true,
+    group: 'schematic',
+    version: '1.0.0',
+    annotations: {
+      readOnlyHint: false,
+      idempotentHint: false,
+    },
+    inputSchema: addCircleInputSchema,
+    outputSchema: z.object({
+      success: z.boolean(),
+      circle: z.unknown().optional(),
+      error: z.string().optional(),
+    }),
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const p = addCircleInputSchema.parse(params);
+      try {
+        const result = await ctx.bridge.call('schematic.addCircle', {
+          centerX: p.centerX,
+          centerY: p.centerY,
+          radius: p.radius,
+          color: p.color,
+          fillColor: p.fillColor,
+          lineWidth: p.lineWidth,
+          lineType: p.lineType,
+          fillStyle: p.fillStyle,
+        });
+        return { success: true, circle: result };
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  });
+
+  registry.register({
+    name: 'easyeda_schematic_add_polygon',
+    title: 'Add schematic polygon',
+    description:
+      'Draw a closed polygon on the schematic sheet from 3+ vertices — custom decorative shapes, ' +
+      'callout arrows, or block diagram elements. Cosmetic only, no electrical meaning.',
+    profile: 'core',
+    evidence: ['runtime-probe'],
+    risk: 'medium',
+    confirmWrite: true,
+    group: 'schematic',
+    version: '1.0.0',
+    annotations: {
+      readOnlyHint: false,
+      idempotentHint: false,
+    },
+    inputSchema: addPolygonInputSchema,
+    outputSchema: z.object({
+      success: z.boolean(),
+      polygon: z.unknown().optional(),
+      error: z.string().optional(),
+    }),
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const p = addPolygonInputSchema.parse(params);
+      try {
+        const result = await ctx.bridge.call('schematic.addPolygon', {
+          points: p.points,
+          color: p.color,
+          fillColor: p.fillColor,
+          lineWidth: p.lineWidth,
+          lineType: p.lineType,
+        });
+        return { success: true, polygon: result };
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  });
+
+  registry.register({
     name: 'easyeda_schematic_delete_primitive',
     title: 'Delete schematic primitives',
     description:
-      'Delete components, wires, or other drawing objects from the schematic by their primitive UUIDs.',
+      'Delete components, wires, or other drawing objects by primitive UUID. Pass projectId + ' +
+      'transactionId for rollback-backed deletion of safely recreatable drawing primitives; unsupported ' +
+      'transactional delete kinds fail before mutation. Without transactionId the write is standalone.',
     profile: 'core',
     evidence: ['official-docs'],
     risk: 'medium',
@@ -157,20 +932,53 @@ function registerSchematicWriteTools(
     inputSchema: deletePrimitiveInputSchema,
     outputSchema: z.object({
       success: z.boolean(),
+      transaction: z
+        .object({
+          id: z.string(),
+          operations: z.array(
+            z.object({
+              operation_id: z.string(),
+              operation_state: transactionOperationStateSchema,
+              target_id: z.string(),
+              before_hash: z.string().optional(),
+              after_hash: z.string().optional(),
+            }),
+          ),
+        })
+        .optional(),
+      error_code: z.string().optional(),
       error: z.string().optional(),
+      details: z.record(z.string(), z.unknown()).optional(),
     }),
     handler: async (ctx: ToolContext, params: unknown) => {
-      const { primitiveIds } = deletePrimitiveInputSchema.parse(params);
+      const { primitiveIds, projectId, transactionId } = deletePrimitiveInputSchema.parse(params);
       try {
-        await ctx.bridge.call('schematic.deletePrimitive', { primitiveIds });
+        if (!transactionId || !projectId) {
+          await ctx.bridge.call('schematic.deletePrimitive', { primitiveIds });
+          return { success: true };
+        }
+
+        const operations = await deletePrimitivesInTransaction(
+          ctx,
+          projectId,
+          transactionId,
+          primitiveIds,
+        );
         return {
           success: true,
+          transaction: {
+            id: transactionId,
+            operations: operations.map((operation) => ({
+              operation_id: operation.id,
+              operation_state: operation.state,
+              target_id: operation.target.id,
+              before_hash: operation.beforeHash,
+              after_hash: operation.afterHash,
+            })),
+          },
         };
       } catch (err) {
-        return {
-          success: false,
-          error: err instanceof Error ? err.message : String(err),
-        };
+        return transactionFailure(err);
       }
     },
   });
@@ -179,7 +987,9 @@ function registerSchematicWriteTools(
     name: 'easyeda_schematic_modify_primitive',
     title: 'Modify schematic primitive',
     description:
-      'Modify properties (value, reference, attributes, etc.) of a schematic component/object.',
+      'Safely modify a schematic primitive while preserving omitted fields. With transactionId and ' +
+      'projectId, capture before/after snapshots and automatically restore the prior state if the ' +
+      'write or post-write read fails. Component moves keep connected wires attached.',
     profile: 'core',
     evidence: ['official-docs'],
     risk: 'medium',
@@ -194,22 +1004,129 @@ function registerSchematicWriteTools(
     outputSchema: z.object({
       success: z.boolean(),
       result: z.unknown().optional(),
+      transaction: z
+        .object({
+          id: z.string(),
+          operation_id: z.string(),
+          operation_state: transactionOperationStateSchema,
+          before_hash: z.string(),
+          after_hash: z.string().optional(),
+        })
+        .optional(),
+      error_code: z.string().optional(),
       error: z.string().optional(),
+      details: z.record(z.string(), z.unknown()).optional(),
     }),
     handler: async (ctx: ToolContext, params: unknown) => {
-      const { primitiveId, property } = modifyPrimitiveInputSchema.parse(params);
+      const { primitiveId, property, projectId, transactionId } =
+        modifyPrimitiveInputSchema.parse(params);
       try {
-        const result = await ctx.bridge.call('schematic.modifyPrimitive', {
-          primitiveId,
-          property,
+        if (!transactionId) {
+          const result = await ctx.bridge.call('schematic.modifyPrimitive', {
+            primitiveId,
+            property,
+          });
+          return { success: true, result };
+        }
+
+        const manager = transactionManagerForProject(transactionId, projectId);
+        const applied = await manager.runModify(transactionId, primitiveId, {
+          getSnapshot: async () =>
+            ctx.bridge.call('schematic.getPrimitiveSnapshot', { primitiveId }),
+          apply: async () =>
+            ctx.bridge.call('schematic.modifyPrimitive', {
+              primitiveId,
+              property,
+            }),
+          restore: async (snapshot) =>
+            ctx.bridge.call('schematic.restorePrimitiveSnapshot', { snapshot }),
         });
         return {
           success: true,
-          result,
+          result: applied.result,
+          transaction: {
+            id: transactionId,
+            operation_id: applied.operation.id,
+            operation_state: applied.operation.state,
+            before_hash: applied.operation.beforeHash,
+            after_hash: applied.operation.afterHash,
+          },
         };
       } catch (err) {
+        return transactionFailure(err);
+      }
+    },
+  });
+
+  registry.register({
+    name: 'easyeda_schematic_set_pin_no_connect',
+    title: 'Set native pin No Connect state',
+    description:
+      "Set or clear EasyEDA Pro's native No Connect marker on one exact component pin. " +
+      'This changes the component pin noConnected state; it does not create a net, label, ' +
+      'power flag, or short-circuit flag. The bridge rejects missing/ambiguous pins and ' +
+      'verifies the native readback after the write.',
+    profile: 'core',
+    evidence: ['official-docs'],
+    risk: 'medium',
+    confirmWrite: true,
+    group: 'schematic',
+    version: '1.0.0',
+    annotations: {
+      readOnlyHint: false,
+      idempotentHint: true,
+    },
+    inputSchema: setPinNoConnectInputSchema,
+    outputSchema: z.object({
+      success: z.boolean(),
+      project_id: z.string(),
+      component_primitive_id: z.string(),
+      pin_primitive_id: z.string().optional(),
+      pin_number: z.string(),
+      previous_no_connected: z.boolean().optional(),
+      no_connected: z.boolean().optional(),
+      changed: z.boolean().optional(),
+      verified: z.boolean().optional(),
+      error_code: z.string().optional(),
+      error: z.string().optional(),
+    }),
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const p = setPinNoConnectInputSchema.parse(params);
+      try {
+        const result = (await ctx.bridge.call('schematic.setPinNoConnect', {
+          projectId: p.projectId,
+          primitiveId: p.primitiveId,
+          pinNumber: p.pinNumber,
+          noConnected: p.noConnected,
+        })) as {
+          componentPrimitiveId?: string;
+          pinPrimitiveId?: string;
+          pinNumber?: string;
+          previousNoConnected?: boolean;
+          noConnected?: boolean;
+          changed?: boolean;
+          verified?: boolean;
+        };
+        return {
+          success: true,
+          project_id: p.projectId,
+          component_primitive_id: result.componentPrimitiveId ?? p.primitiveId,
+          pin_primitive_id: result.pinPrimitiveId,
+          pin_number: result.pinNumber ?? p.pinNumber,
+          previous_no_connected: result.previousNoConnected,
+          no_connected: result.noConnected,
+          changed: result.changed,
+          verified: result.verified,
+        };
+      } catch (err) {
+        const record =
+          err && typeof err === 'object' ? (err as Record<string, unknown>) : undefined;
         return {
           success: false,
+          project_id: p.projectId,
+          component_primitive_id: p.primitiveId,
+          pin_number: p.pinNumber,
+          error_code: typeof record?.code === 'string' ? record.code : undefined,
           error: err instanceof Error ? err.message : String(err),
         };
       }
@@ -220,7 +1137,10 @@ function registerSchematicWriteTools(
     name: 'easyeda_schematic_create_net_flag',
     title: 'Create net flag',
     description:
-      'Create a named schematic net flag at specified coordinates. This controlled write declares real SCH_Net connectivity in the EasyEDA Pro netlist.',
+      'Create a named net flag/label. With `identification` (Power/Ground/AnalogGround/' +
+      'ProtectGround) it places a power-flag symbol binding to a coincident pin (use for ' +
+      'VCC/GND). Without it, a generic net label — cosmetic only; connect pins with add_wire ' +
+      'stubs sharing one netName.',
     profile: 'core',
     evidence: ['inferred'],
     risk: 'medium',
@@ -237,7 +1157,16 @@ function registerSchematicWriteTools(
       x: z.number().describe('X coordinate on the schematic canvas'),
       y: z.number().describe('Y coordinate on the schematic canvas'),
       rotation: z.number().optional().describe('Rotation in degrees (0, 90, 180, 270)'),
-      confirmWrite: z.literal(true),
+      identification: z
+        .enum(['Power', 'Ground', 'AnalogGround', 'ProtectGround'])
+        .optional()
+        .describe(
+          'Power-flag identification. When set, places an EasyEDA power/ground flag symbol of this type. ' +
+            'When omitted, places a generic named net label instead.',
+        ),
+      confirmWrite: z
+        .literal(true)
+        .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
     }),
     outputSchema: z.object({
       success: z.boolean(),
@@ -256,6 +1185,7 @@ function registerSchematicWriteTools(
         x: number;
         y: number;
         rotation?: number;
+        identification?: string;
       };
       try {
         const result = await ctx.bridge.call('schematic.createNetFlag', {
@@ -264,6 +1194,7 @@ function registerSchematicWriteTools(
           x: p.x,
           y: p.y,
           rotation: p.rotation,
+          identification: p.identification,
         });
         const data = result as { primitiveId?: string; netName?: string };
         return {
@@ -309,7 +1240,9 @@ function registerSchematicWriteTools(
         .optional()
         .describe('Electrical type of the port'),
       rotation: z.number().optional().describe('Rotation in degrees (0, 90, 180, 270)'),
-      confirmWrite: z.literal(true),
+      confirmWrite: z
+        .literal(true)
+        .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
     }),
     outputSchema: z.object({
       success: z.boolean(),
@@ -360,15 +1293,15 @@ function registerSchematicWriteTools(
     name: 'easyeda_schematic_connect_pin_to_net',
     title: 'Connect pin to net',
     description:
-      'Connect a specific component pin to a named net. This creates an actual SCH_Netlist entry ' +
-      'associating the pin with the net. If the net does not exist yet, it is created on the fly. ' +
-      'This is the core tool for populating the real EasyEDA netlist with pin-to-net connectivity.',
+      'Create real EasyEDA connectivity for a pin: draws a short wire stub from its exact ' +
+      'coordinate, tagged with netName. Same-netName wires merge globally, so this joins the pin ' +
+      'to everything else on that net — visible to ERC, ratsnest, and autorouting.',
     profile: 'core',
-    evidence: ['inferred'],
+    evidence: ['runtime-probe'],
     risk: 'medium',
     confirmWrite: true,
     group: 'schematic',
-    version: '1.0.0',
+    version: '2.0.0',
     annotations: {
       readOnlyHint: false,
       idempotentHint: false,
@@ -383,10 +1316,20 @@ function registerSchematicWriteTools(
         .string()
         .min(1)
         .describe('The net name to connect the pin to (e.g. VCC, GND, DATA0)'),
-      confirmWrite: z.literal(true),
+      stubLength: z
+        .number()
+        .positive()
+        .optional()
+        .describe('Length of the wire stub drawn outward from the pin. Defaults to 10.'),
+      confirmWrite: z
+        .literal(true)
+        .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
     }),
     outputSchema: z.object({
       success: z.boolean(),
+      real: z.boolean().optional(),
+      created_primitive_id: z.string().optional(),
+      endpoint: z.object({ x: z.number(), y: z.number() }).optional(),
       connection: z
         .object({
           primitiveId: z.string(),
@@ -402,6 +1345,7 @@ function registerSchematicWriteTools(
         primitiveId: string;
         pinNumber: string;
         netName: string;
+        stubLength?: number;
       };
       try {
         const result = await ctx.bridge.call('schematic.connectPinToNet', {
@@ -409,10 +1353,19 @@ function registerSchematicWriteTools(
           primitiveId: p.primitiveId,
           pinNumber: p.pinNumber,
           netName: p.netName,
+          stubLength: p.stubLength,
         });
-        const data = result as { connected?: boolean };
+        const data = result as {
+          connected?: boolean;
+          real?: boolean;
+          primitiveId?: string;
+          endpoint?: { x: number; y: number };
+        };
         return {
           success: data?.connected !== false,
+          real: data?.real,
+          created_primitive_id: data?.primitiveId,
+          endpoint: data?.endpoint,
           connection: {
             primitiveId: p.primitiveId,
             pinNumber: p.pinNumber,
@@ -432,15 +1385,16 @@ function registerSchematicWriteTools(
     name: 'easyeda_schematic_connect_pins_by_net',
     title: 'Connect pins by net',
     description:
-      'Connect multiple component pins to a named net in a single operation. ' +
-      'All specified pins will be assigned to the same net, creating SCH_Netlist entries. ' +
-      'If the net does not exist, it is created. This is the bulk equivalent of connect_pin_to_net.',
+      'Bulk variant of connect_pin_to_net: draws a real wire stub from each pin, tagged with ' +
+      'netName, so all listed pins (and anything else already on that net) merge into one net. ' +
+      'Visible to ERC, ratsnest, and autorouting. A pin that fails (e.g. collision) is reported ' +
+      'in failures rather than aborting the batch.',
     profile: 'core',
-    evidence: ['inferred'],
+    evidence: ['runtime-probe'],
     risk: 'medium',
     confirmWrite: true,
     group: 'schematic',
-    version: '1.0.0',
+    version: '2.0.0',
     annotations: {
       readOnlyHint: false,
       idempotentHint: false,
@@ -458,10 +1412,28 @@ function registerSchematicWriteTools(
         .min(1)
         .max(500)
         .describe('List of component pins to connect to the net'),
-      confirmWrite: z.literal(true),
+      stubLength: z
+        .number()
+        .positive()
+        .optional()
+        .describe('Length of the wire stub drawn outward from each pin. Defaults to 10.'),
+      confirmWrite: z
+        .literal(true)
+        .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
     }),
     outputSchema: z.object({
       success: z.boolean(),
+      real: z.boolean().optional(),
+      created_primitive_ids: z.array(z.string()).optional(),
+      failures: z
+        .array(
+          z.object({
+            primitiveId: z.string(),
+            pinNumber: z.string(),
+            error: z.string(),
+          }),
+        )
+        .optional(),
       connections: z
         .array(
           z.object({
@@ -479,18 +1451,28 @@ function registerSchematicWriteTools(
         projectId: string;
         netName: string;
         pins: Array<{ primitiveId: string; pinNumber: string }>;
+        stubLength?: number;
       };
       try {
         const result = await ctx.bridge.call('schematic.connectPinsByNet', {
           projectId: p.projectId,
           netName: p.netName,
           pins: p.pins,
+          stubLength: p.stubLength,
         });
-        const data = result as { count?: number };
+        const data = result as {
+          count?: number;
+          real?: boolean;
+          createdPrimitiveIds?: string[];
+          failures?: Array<{ primitiveId: string; pinNumber: string; error: string }>;
+        };
         const count = data?.count ?? p.pins.length;
 
         return {
           success: true,
+          real: data?.real,
+          created_primitive_ids: data?.createdPrimitiveIds,
+          failures: data?.failures,
           connections: p.pins.map((pin) => ({
             primitiveId: pin.primitiveId,
             pinNumber: pin.pinNumber,
@@ -527,7 +1509,9 @@ function registerSchematicWriteTools(
     },
     inputSchema: z.object({
       projectId: z.string().describe('The project/schematic ID to save'),
-      confirmWrite: z.literal(true),
+      confirmWrite: z
+        .literal(true)
+        .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
     }),
     outputSchema: z.object({
       success: z.boolean(),
@@ -549,6 +1533,116 @@ function registerSchematicWriteTools(
         return {
           success: false,
           project_id: projectId,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  });
+
+  registry.register({
+    name: 'easyeda_schematic_set_title_block',
+    title: 'Set schematic title block fields',
+    description:
+      'Update schematic title block text fields (Company, Version, Drawn, Reviewed, Page Size). ' +
+      'Only these 5 are exposed — writing Symbol/Border/Device/etc once corrupted a real title ' +
+      'block; those are read-only natively and must be fixed via the EasyEDA Pro UI.',
+    profile: 'core',
+    evidence: ['runtime-probe'],
+    risk: 'medium',
+    confirmWrite: true,
+    group: 'schematic',
+    version: '1.1.0',
+    annotations: {
+      readOnlyHint: false,
+      idempotentHint: false,
+    },
+    inputSchema: z.object({
+      fields: z
+        .record(
+          z.enum(['Company', 'Version', 'Drawn', 'Reviewed', 'Page Size']),
+          z.object({
+            showTitle: z.boolean().optional(),
+            showValue: z.boolean().optional(),
+            value: z.union([z.string(), z.number()]).optional(),
+          }),
+        )
+        .describe(
+          'Map of title block field name to the sub-fields to change, e.g. { "Company": { "value": "ACME", "showValue": true } }',
+        ),
+      showTitleBlock: z.boolean().optional().describe('Show/hide the whole title block'),
+      confirmWrite: z
+        .literal(true)
+        .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
+    }),
+    outputSchema: z.object({
+      success: z.boolean(),
+      error: z.string().optional(),
+    }),
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const p = params as {
+        fields: Record<
+          string,
+          { showTitle?: boolean; showValue?: boolean; value?: string | number }
+        >;
+        showTitleBlock?: boolean;
+      };
+      try {
+        const result = await ctx.bridge.call('schematic.setTitleBlock', {
+          fields: p.fields,
+          showTitleBlock: p.showTitleBlock,
+        });
+        const data = result as { success?: boolean };
+        return { success: data?.success ?? false };
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  });
+
+  registry.register({
+    name: 'easyeda_schematic_sync_to_pcb',
+    title: 'Request schematic-to-PCB sync (needs human approval)',
+    description:
+      'Request a schematic-to-PCB sync (SCH_Document.importChanges). CAUTION (live-verified): ' +
+      "opens a confirmation dialog in EasyEDA Pro's UI a HUMAN must approve — success here only " +
+      'means the request was sent, not that components appeared. Ask the user to approve the ' +
+      'dialog, then verify with pcb_components.',
+    profile: 'core',
+    evidence: ['runtime-probe'],
+    risk: 'medium',
+    confirmWrite: true,
+    group: 'schematic',
+    version: '2.0.0',
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+    inputSchema: z.object({
+      projectId: z.string().optional(),
+      confirmWrite: z
+        .literal(true)
+        .describe('Must be the literal boolean true (not the string "true") to allow this write.'),
+    }),
+    outputSchema: z.object({
+      success: z.boolean(),
+      requested: z.boolean().optional(),
+      note: z.string().optional(),
+      error: z.string().optional(),
+    }),
+    handler: async (ctx: ToolContext, params: unknown) => {
+      const { projectId } = params as { projectId?: string };
+      try {
+        const result = await ctx.bridge.call('schematic.syncToPcb', { projectId });
+        const data = result as { synced?: boolean };
+        return {
+          success: true,
+          requested: data?.synced ?? true,
+          note: 'EasyEDA opened a confirmation dialog in its UI — ask the user to approve it, then verify with pcb_components before assuming the sync completed.',
+        };
+      } catch (err) {
+        return {
+          success: false,
           error: err instanceof Error ? err.message : String(err),
         };
       }

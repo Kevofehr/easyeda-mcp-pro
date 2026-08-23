@@ -2,6 +2,7 @@ import { request } from 'undici';
 import type { Readable } from 'node:stream';
 import { EasyEdaMcpError } from '../schemas/common.js';
 import type pino from 'pino';
+import { getGlobalMetricsCollector } from '../observability/index.js';
 
 /** Default max retries for HTTP requests (2 retries = 3 total attempts). */
 export const DEFAULT_MAX_RETRIES = 2;
@@ -9,6 +10,37 @@ export const DEFAULT_MAX_RETRIES = 2;
 export const DEFAULT_BASE_DELAY_MS = 1000;
 /** Default timeout for HTTP requests (30 seconds). */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+let vendorMinIntervalMs = 0;
+const lastRequestAtByHost = new Map<string, number>();
+
+/**
+ * Configure the minimum interval between outbound requests to the same
+ * vendor hostname. Applied by {@link httpRequestWithRetry} before every
+ * attempt (including retries). Set to 0 to disable rate limiting.
+ */
+export function configureVendorRateLimit(minIntervalMs: number): void {
+  vendorMinIntervalMs = Math.max(0, minIntervalMs);
+}
+
+/** Test-only: reset rate limiter state between test cases. */
+export function resetVendorRateLimitStateForTests(): void {
+  lastRequestAtByHost.clear();
+  vendorMinIntervalMs = 0;
+}
+
+async function waitForVendorRateLimit(hostname: string): Promise<void> {
+  if (vendorMinIntervalMs <= 0) return;
+  const last = lastRequestAtByHost.get(hostname);
+  const now = Date.now();
+  if (last !== undefined) {
+    const elapsed = now - last;
+    if (elapsed < vendorMinIntervalMs) {
+      await new Promise((resolve) => setTimeout(resolve, vendorMinIntervalMs - elapsed));
+    }
+  }
+  lastRequestAtByHost.set(hostname, Date.now());
+}
 
 /**
  * Read the entire body of a readable stream and return it as a UTF-8 string.
@@ -68,10 +100,13 @@ export async function httpRequestWithRetry(
   const method = options.method ?? 'GET';
   const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   let lastError: unknown;
+  const requestStartedAt = Date.now();
+  const vendorName = new URL(url).hostname;
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     try {
       logger.debug({ url, method, attempt }, 'http request');
+      await waitForVendorRateLimit(vendorName);
 
       const { statusCode, body } = await request(url, {
         method,
@@ -89,6 +124,12 @@ export async function httpRequestWithRetry(
         continue;
       }
 
+      getGlobalMetricsCollector().recordVendor(
+        vendorName,
+        Date.now() - requestStartedAt,
+        statusCode < 400,
+        statusCode,
+      );
       return { statusCode, responseText };
     } catch (err) {
       lastError = err;
@@ -101,6 +142,7 @@ export async function httpRequestWithRetry(
     }
   }
 
+  getGlobalMetricsCollector().recordVendor(vendorName, Date.now() - requestStartedAt, false);
   throw lastError instanceof EasyEdaMcpError
     ? lastError
     : new EasyEdaMcpError({

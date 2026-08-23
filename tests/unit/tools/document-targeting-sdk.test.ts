@@ -1,8 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport, McpServer } from '@modelcontextprotocol/server';
 import { ToolRegistry } from '../../../src/tools/registry.js';
 import { type ToolContext } from '../../../src/tools/types.js';
 

@@ -240,3 +240,378 @@ describe('edge cases', () => {
     expect(result.errors.length).toBeGreaterThan(0);
   });
 });
+
+// ── Semantic ERC ───────────────────────────────────────────────────────────
+
+describe('semantic ERC', () => {
+  it('detects active output contention on a signal net', () => {
+    const result = validateNets({
+      nets: [
+        { id: 'pwr', name: '3V3', type: 'power', nodes: [{ deviceRef: 'U1', pin: 'VDD' }] },
+        { id: 'gnd', name: 'GND', type: 'ground', nodes: [{ deviceRef: 'U1', pin: 'GND' }] },
+        {
+          id: 'sig',
+          name: 'BUS_DRV',
+          type: 'signal',
+          nodes: [
+            { deviceRef: 'U1', pin: 'OUT' },
+            { deviceRef: 'U2', pin: 'OUT' },
+          ],
+        },
+      ],
+      devices: [
+        { id: 'U1', ref: 'U1', pins: [{ pin: 'OUT', electricalType: 'output' }] },
+        { id: 'U2', ref: 'U2', pins: [{ pin: 'OUT', electricalType: 'output' }] },
+      ],
+    });
+
+    const issues = result.errors.filter((e) => e.code === NetValidationCode.NetOutputContention);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].severity).toBe('error');
+    expect(issues[0].netName).toBe('BUS_DRV');
+    expect(issues[0].remediationHint).toContain('push-pull outputs');
+  });
+
+  it('warns on floating input nets that have no driver or pull resistor', () => {
+    const result = validateNets({
+      nets: [
+        { id: 'pwr', name: '3V3', type: 'power', nodes: [{ deviceRef: 'U1', pin: 'VDD' }] },
+        { id: 'gnd', name: 'GND', type: 'ground', nodes: [{ deviceRef: 'U1', pin: 'GND' }] },
+        { id: 'sig', name: 'ENABLE', type: 'signal', nodes: [{ deviceRef: 'U1', pin: 'EN' }] },
+      ],
+      devices: [
+        {
+          id: 'U1',
+          ref: 'U1',
+          pins: [
+            { pin: 'VDD', electricalType: 'power_input', expectedNetType: 'power' },
+            { pin: 'GND', electricalType: 'power_input', expectedNetType: 'ground' },
+            { pin: 'EN', electricalType: 'input' },
+          ],
+        },
+      ],
+    });
+
+    const issues = result.warnings.filter((e) => e.code === NetValidationCode.NetFloatingInput);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].componentRef).toBe('U1');
+    expect(issues[0].pin).toBe('EN');
+  });
+
+  it('does not warn for an input held by a pull-up resistor', () => {
+    const result = validateNets({
+      nets: [
+        {
+          id: 'pwr',
+          name: '3V3',
+          type: 'power',
+          nodes: [
+            { deviceRef: 'U1', pin: 'VDD' },
+            { deviceRef: 'R1', pin: '1' },
+          ],
+        },
+        { id: 'gnd', name: 'GND', type: 'ground', nodes: [{ deviceRef: 'U1', pin: 'GND' }] },
+        {
+          id: 'sig',
+          name: 'I2C_SDA',
+          type: 'signal',
+          nodes: [
+            { deviceRef: 'U1', pin: 'SDA' },
+            { deviceRef: 'R1', pin: '2' },
+          ],
+        },
+      ],
+      devices: [
+        {
+          id: 'U1',
+          ref: 'U1',
+          pins: [
+            { pin: 'VDD', electricalType: 'power_input', expectedNetType: 'power' },
+            { pin: 'GND', electricalType: 'power_input', expectedNetType: 'ground' },
+            { pin: 'SDA', electricalType: 'input' },
+          ],
+        },
+        {
+          id: 'R1',
+          ref: 'R1',
+          category: 'resistor',
+          pins: [
+            { pin: '1', electricalType: 'passive' },
+            { pin: '2', electricalType: 'passive' },
+          ],
+        },
+      ],
+    });
+
+    expect(
+      [...result.errors, ...result.warnings].filter(
+        (e) => e.code === NetValidationCode.NetFloatingInput,
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('detects multiple power sources on the same power rail', () => {
+    const result = validateNets({
+      nets: [
+        {
+          id: 'pwr',
+          name: '3V3',
+          type: 'power',
+          nodes: [
+            { deviceRef: 'U1', pin: 'OUT' },
+            { deviceRef: 'U2', pin: 'OUT' },
+            { deviceRef: 'U3', pin: 'VDD' },
+          ],
+        },
+        { id: 'gnd', name: 'GND', type: 'ground', nodes: [{ deviceRef: 'U3', pin: 'GND' }] },
+      ],
+      devices: [
+        {
+          id: 'U1',
+          ref: 'U1',
+          category: 'regulator',
+          pins: [{ pin: 'OUT', electricalType: 'power_output' }],
+        },
+        {
+          id: 'U2',
+          ref: 'U2',
+          category: 'regulator',
+          pins: [{ pin: 'OUT', electricalType: 'power_output' }],
+        },
+        { id: 'U3', ref: 'U3', pins: [{ pin: 'VDD', electricalType: 'power_input' }] },
+      ],
+    });
+
+    const issues = result.errors.filter((e) => e.code === NetValidationCode.NetPowerConflict);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain('power sources');
+  });
+
+  it('warns for passive-only signal nets', () => {
+    const result = validateNets({
+      nets: [
+        { id: 'pwr', name: '3V3', type: 'power', nodes: [{ deviceRef: 'U1', pin: 'VDD' }] },
+        { id: 'gnd', name: 'GND', type: 'ground', nodes: [{ deviceRef: 'U1', pin: 'GND' }] },
+        {
+          id: 'sig',
+          name: 'RC_NODE',
+          type: 'signal',
+          nodes: [
+            { deviceRef: 'R1', pin: '1' },
+            { deviceRef: 'C1', pin: '1' },
+          ],
+        },
+      ],
+      devices: [
+        { id: 'U1', ref: 'U1', pins: [{ pin: 'VDD', electricalType: 'power_input' }] },
+        {
+          id: 'R1',
+          ref: 'R1',
+          category: 'resistor',
+          pins: [{ pin: '1', electricalType: 'passive' }],
+        },
+        {
+          id: 'C1',
+          ref: 'C1',
+          category: 'capacitor',
+          pins: [{ pin: '1', electricalType: 'passive' }],
+        },
+      ],
+    });
+
+    const issues = result.warnings.filter((e) => e.code === NetValidationCode.NetPassiveOnly);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].netName).toBe('RC_NODE');
+  });
+
+  it('detects missing required power pins', () => {
+    const result = validateNets({
+      nets: [
+        { id: 'pwr', name: '3V3', type: 'power', nodes: [] },
+        { id: 'gnd', name: 'GND', type: 'ground', nodes: [{ deviceRef: 'U1', pin: 'GND' }] },
+      ],
+      devices: [
+        {
+          id: 'U1',
+          ref: 'U1',
+          category: 'microcontroller',
+          pins: [
+            {
+              pin: 'VDD',
+              name: 'VDD',
+              electricalType: 'power_input',
+              required: true,
+              expectedNetType: 'power',
+            },
+            {
+              pin: 'GND',
+              name: 'GND',
+              electricalType: 'power_input',
+              required: true,
+              expectedNetType: 'ground',
+            },
+          ],
+        },
+      ],
+    });
+
+    const issues = result.errors.filter((e) => e.code === NetValidationCode.NetUnpoweredDevice);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].componentRef).toBe('U1');
+    expect(issues[0].pin).toBe('VDD');
+  });
+
+  it('detects required power pins connected to the wrong net class', () => {
+    const result = validateNets({
+      nets: [
+        { id: 'pwr', name: '3V3', type: 'power', nodes: [{ deviceRef: 'U1', pin: 'GND' }] },
+        { id: 'gnd', name: 'GND', type: 'ground', nodes: [{ deviceRef: 'U1', pin: 'VDD' }] },
+      ],
+      devices: [
+        {
+          id: 'U1',
+          ref: 'U1',
+          pins: [
+            { pin: 'VDD', electricalType: 'power_input', required: true, expectedNetType: 'power' },
+            {
+              pin: 'GND',
+              electricalType: 'power_input',
+              required: true,
+              expectedNetType: 'ground',
+            },
+          ],
+        },
+      ],
+    });
+
+    const issues = result.errors.filter((e) => e.code === NetValidationCode.NetUnpoweredDevice);
+    expect(issues).toHaveLength(2);
+  });
+
+  it('warns when a device requiring decoupling has no capacitor across power and ground', () => {
+    const result = validateNets({
+      nets: [
+        { id: 'pwr', name: '3V3', type: 'power', nodes: [{ deviceRef: 'U1', pin: 'VDD' }] },
+        { id: 'gnd', name: 'GND', type: 'ground', nodes: [{ deviceRef: 'U1', pin: 'GND' }] },
+      ],
+      devices: [
+        {
+          id: 'U1',
+          ref: 'U1',
+          category: 'microcontroller',
+          requiresDecoupling: true,
+          pins: [
+            { pin: 'VDD', electricalType: 'power_input', required: true, expectedNetType: 'power' },
+            {
+              pin: 'GND',
+              electricalType: 'power_input',
+              required: true,
+              expectedNetType: 'ground',
+            },
+          ],
+        },
+      ],
+    });
+
+    const issues = result.warnings.filter((e) => e.code === NetValidationCode.NetMissingDecoupling);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].remediationHint).toContain('decoupling capacitor');
+  });
+
+  it('does not warn for required decoupling when a capacitor bridges power and ground', () => {
+    const result = validateNets({
+      nets: [
+        {
+          id: 'pwr',
+          name: '3V3',
+          type: 'power',
+          nodes: [
+            { deviceRef: 'U1', pin: 'VDD' },
+            { deviceRef: 'C1', pin: '1' },
+          ],
+        },
+        {
+          id: 'gnd',
+          name: 'GND',
+          type: 'ground',
+          nodes: [
+            { deviceRef: 'U1', pin: 'GND' },
+            { deviceRef: 'C1', pin: '2' },
+          ],
+        },
+      ],
+      devices: [
+        {
+          id: 'U1',
+          ref: 'U1',
+          category: 'microcontroller',
+          requiresDecoupling: true,
+          pins: [
+            { pin: 'VDD', electricalType: 'power_input', required: true, expectedNetType: 'power' },
+            {
+              pin: 'GND',
+              electricalType: 'power_input',
+              required: true,
+              expectedNetType: 'ground',
+            },
+          ],
+        },
+        {
+          id: 'C1',
+          ref: 'C1',
+          category: 'capacitor',
+          pins: [
+            { pin: '1', electricalType: 'passive' },
+            { pin: '2', electricalType: 'passive' },
+          ],
+        },
+      ],
+    });
+
+    expect(
+      [...result.errors, ...result.warnings].filter(
+        (e) => e.code === NetValidationCode.NetMissingDecoupling,
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('detects voltage-domain mismatches', () => {
+    const result = validateNets({
+      nets: [
+        {
+          id: 'pwr',
+          name: '5V',
+          type: 'power',
+          nodes: [{ deviceRef: 'U1', pin: 'VDD' }],
+        },
+        { id: 'gnd', name: 'GND', type: 'ground', nodes: [{ deviceRef: 'U1', pin: 'GND' }] },
+      ],
+      devices: [
+        {
+          id: 'U1',
+          ref: 'U1',
+          pins: [
+            {
+              pin: 'VDD',
+              electricalType: 'power_input',
+              required: true,
+              expectedNetType: 'power',
+              expectedVoltage: 3.3,
+            },
+            {
+              pin: 'GND',
+              electricalType: 'power_input',
+              required: true,
+              expectedNetType: 'ground',
+            },
+          ],
+        },
+      ],
+    });
+
+    const issues = result.errors.filter((e) => e.code === NetValidationCode.NetVoltageMismatch);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].details?.expectedVoltage).toBe(3.3);
+    expect(issues[0].details?.actualVoltage).toBe(5);
+  });
+});

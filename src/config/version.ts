@@ -1,1 +1,1 @@
-export const SERVER_VERSION = '0.7.3'; // x-release-please-version
+export const SERVER_VERSION = '1.0.0-rc.6'; // x-release-please-version
