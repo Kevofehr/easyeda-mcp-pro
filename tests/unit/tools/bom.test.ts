@@ -225,9 +225,28 @@ describe('BOM Tools Sourcing & Validate', () => {
       fs.rmSync(tmpArtifactDir, { recursive: true, force: true });
     });
 
-    it('exports the BOM to a file inside the artifact directory', async () => {
+    const sampleRows = [
+      {
+        reference: 'R1, R2',
+        value: '10k',
+        footprint: '0603',
+        lcsc: 'C25804',
+        quantity: 2,
+        manufacturer: 'Uniroyal',
+      },
+      {
+        reference: 'C1',
+        value: '100nF',
+        footprint: '0402',
+        lcsc: 'C1525',
+        quantity: 1,
+        manufacturer: 'Samsung',
+      },
+    ];
+
+    it('writes a real CSV file with a header row and the BOM entries', async () => {
       const tool = registry.get('easyeda_bom_export');
-      bridgeCall.mockResolvedValue({ entryCount: 3 });
+      bridgeCall.mockResolvedValue(sampleRows);
       const filePath = path.join(tmpArtifactDir, 'bom.csv');
 
       const result = await tool?.handler(context, {
@@ -237,12 +256,111 @@ describe('BOM Tools Sourcing & Validate', () => {
       });
 
       expect(result.exported).toBe(true);
-      expect(result.entry_count).toBe(3);
+      expect(result.entry_count).toBe(2);
+
+      // The returned path must exist and be non-empty.
+      expect(fs.existsSync(result.file_path)).toBe(true);
+      const stat = fs.statSync(result.file_path);
+      expect(stat.isFile()).toBe(true);
+      expect(stat.size).toBeGreaterThan(0);
+      expect(result.byte_length).toBe(stat.size);
+
+      const content = fs.readFileSync(result.file_path, 'utf-8');
+      const lines = content.trimEnd().split('\r\n');
+      expect(lines[0]).toBe('reference,value,footprint,lcsc,quantity,manufacturer');
+      // The comma-joined designator list must be quoted, not split into columns.
+      expect(lines[1]).toBe('"R1, R2",10k,0603,C25804,2,Uniroyal');
+      expect(lines[2]).toBe('C1,100nF,0402,C1525,1,Samsung');
+      // LCSC part numbers and designators survive the round trip.
+      expect(content).toContain('C25804');
+      expect(content).toContain('R1, R2');
+    });
+
+    it('asks the bridge for BOM rows rather than a server-side export path', async () => {
+      const tool = registry.get('easyeda_bom_export');
+      bridgeCall.mockResolvedValue(sampleRows);
+
+      await tool?.handler(context, {
+        projectId: 'proj-1',
+        format: 'csv',
+        filePath: path.join(tmpArtifactDir, 'bom.csv'),
+      });
+
+      expect(bridgeCall).toHaveBeenCalledWith('bom.generate', {
+        projectId: 'proj-1',
+        format: 'json',
+        groupBy: 'value',
+      });
+    });
+
+    it('writes a JSON file when format is json', async () => {
+      const tool = registry.get('easyeda_bom_export');
+      bridgeCall.mockResolvedValue(sampleRows);
+      const filePath = path.join(tmpArtifactDir, 'bom.json');
+
+      const result = await tool?.handler(context, {
+        projectId: 'proj-1',
+        format: 'json',
+        filePath,
+      });
+
+      expect(result.exported).toBe(true);
+      expect(fs.existsSync(result.file_path)).toBe(true);
+      const parsed = JSON.parse(fs.readFileSync(result.file_path, 'utf-8'));
+      expect(parsed).toHaveLength(2);
+      expect(parsed[0].lcsc).toBe('C25804');
+    });
+
+    it('escapes commas, quotes and newlines in CSV fields', async () => {
+      const tool = registry.get('easyeda_bom_export');
+      bridgeCall.mockResolvedValue([
+        {
+          reference: 'U1',
+          value: 'A "quoted" part',
+          footprint: 'SOT-23, wide',
+          lcsc: 'C1',
+          quantity: 1,
+          manufacturer: 'Line1\nLine2',
+        },
+      ]);
+      const filePath = path.join(tmpArtifactDir, 'escaped.csv');
+
+      const result = await tool?.handler(context, {
+        projectId: 'proj-1',
+        format: 'csv',
+        filePath,
+      });
+
+      expect(result.exported).toBe(true);
+      const content = fs.readFileSync(result.file_path, 'utf-8');
+      expect(content).toContain('"A ""quoted"" part"');
+      expect(content).toContain('"SOT-23, wide"');
+      expect(content).toContain('"Line1\nLine2"');
+    });
+
+    it('writes a header-only file for an empty BOM and reports zero entries', async () => {
+      const tool = registry.get('easyeda_bom_export');
+      bridgeCall.mockResolvedValue([]);
+      const filePath = path.join(tmpArtifactDir, 'empty.csv');
+
+      const result = await tool?.handler(context, {
+        projectId: 'proj-1',
+        format: 'csv',
+        filePath,
+      });
+
+      expect(result.exported).toBe(true);
+      expect(result.entry_count).toBe(0);
+      expect(fs.existsSync(result.file_path)).toBe(true);
+      expect(fs.statSync(result.file_path).size).toBeGreaterThan(0);
+      expect(fs.readFileSync(result.file_path, 'utf-8').trimEnd()).toBe(
+        'reference,value,footprint,lcsc,quantity,manufacturer',
+      );
     });
 
     it('creates missing parent directories before exporting', async () => {
       const tool = registry.get('easyeda_bom_export');
-      bridgeCall.mockResolvedValue({ entryCount: 1 });
+      bridgeCall.mockResolvedValue(sampleRows);
       const filePath = path.join(tmpArtifactDir, 'nested', 'dir', 'bom.csv');
 
       const result = await tool?.handler(context, {
@@ -253,6 +371,44 @@ describe('BOM Tools Sourcing & Validate', () => {
 
       expect(result.exported).toBe(true);
       expect(fs.existsSync(path.dirname(filePath))).toBe(true);
+      expect(fs.existsSync(filePath)).toBe(true);
+    });
+
+    it('regression: does not claim success when the bridge returns no BOM rows', async () => {
+      // The pre-fix bridge contract was assumed to be `{entryCount: n}` plus a
+      // server-side file write that never happened, so the tool answered
+      // `exported: true` with nothing on disk. Any non-array reply must now fail.
+      const tool = registry.get('easyeda_bom_export');
+      bridgeCall.mockResolvedValue({ entryCount: 3 });
+      const filePath = path.join(tmpArtifactDir, 'phantom.csv');
+
+      const result = await tool?.handler(context, {
+        projectId: 'proj-1',
+        format: 'csv',
+        filePath,
+      });
+
+      expect(result.exported).toBe(false);
+      expect(result.not_available).toBe(true);
+      expect(result.error).toMatch(/did not return BOM rows/i);
+      expect(fs.existsSync(filePath)).toBe(false);
+    });
+
+    it('reports an honest failure for xlsx instead of a phantom success', async () => {
+      const tool = registry.get('easyeda_bom_export');
+      bridgeCall.mockResolvedValue(sampleRows);
+      const filePath = path.join(tmpArtifactDir, 'bom.xlsx');
+
+      const result = await tool?.handler(context, {
+        projectId: 'proj-1',
+        format: 'xlsx',
+        filePath,
+      });
+
+      expect(result.exported).toBe(false);
+      expect(result.not_available).toBe(true);
+      expect(result.error).toMatch(/csv/i);
+      expect(fs.existsSync(filePath)).toBe(false);
     });
 
     it('rejects a file path that escapes the artifact directory', async () => {
@@ -267,7 +423,25 @@ describe('BOM Tools Sourcing & Validate', () => {
 
       expect(result.exported).toBe(false);
       expect(result.not_available).toBe(true);
+      expect(result.error).toMatch(/inside the artifact directory/i);
       expect(bridgeCall).not.toHaveBeenCalled();
+      expect(fs.existsSync(outsidePath)).toBe(false);
+    });
+
+    it('rejects a traversal path that escapes the artifact directory', async () => {
+      const tool = registry.get('easyeda_bom_export');
+      const traversalPath = path.join(tmpArtifactDir, '..', 'escaped-bom.csv');
+
+      const result = await tool?.handler(context, {
+        projectId: 'proj-1',
+        format: 'csv',
+        filePath: traversalPath,
+      });
+
+      expect(result.exported).toBe(false);
+      expect(result.not_available).toBe(true);
+      expect(bridgeCall).not.toHaveBeenCalled();
+      expect(fs.existsSync(path.resolve(traversalPath))).toBe(false);
     });
 
     it('returns not_available when the bridge export call fails', async () => {

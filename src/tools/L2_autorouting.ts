@@ -1,7 +1,6 @@
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { z } from 'zod';
 import { type ToolDefinition, type ToolContext } from './types.js';
+import { writeArtifactFile } from './artifact-write.js';
 import { type EnvConfig } from '../config/env.js';
 import { planFloorplan, type FloorplanInput } from '../pcb-layout/floorplan.js';
 import {
@@ -498,16 +497,7 @@ function writeRouteContextFile(
   }
   const buffer = Buffer.from(binary.base64, 'base64');
   const fileName = binary.fileName || defaultFileName;
-  const artifactDir = path.resolve(ctx.config.artifactDir);
-  const target = requestedPath ? path.resolve(requestedPath) : path.resolve(artifactDir, fileName);
-  const relative = path.relative(artifactDir, target);
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
-    return { ok: false, error: 'File path must be inside the artifact directory.' };
-  }
-  const parentDir = path.dirname(target);
-  if (!fs.existsSync(parentDir)) fs.mkdirSync(parentDir, { recursive: true });
-  fs.writeFileSync(target, buffer);
-  return { ok: true, filePath: target, byteLength: buffer.byteLength };
+  return writeArtifactFile(ctx, buffer, requestedPath, fileName);
 }
 
 function registerExportRouteContextTool(registry: { register: (def: ToolDefinition) => void }) {

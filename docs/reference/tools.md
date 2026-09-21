@@ -348,7 +348,9 @@ Returns a JSON object matching the schema:
   file_path: string;
   exported: boolean;
   entry_count: number(optional);
+  byte_length: number(optional);
   not_available: boolean(optional);
+  error: string(optional);
 }
 ```
 

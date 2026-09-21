@@ -1,7 +1,6 @@
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { z } from 'zod';
 import { type ToolDefinition, type ToolContext } from './types.js';
+import { writeArtifactFile, type WriteExportResult } from './artifact-write.js';
 import { type EnvConfig } from '../config/env.js';
 import { validatePcbConstraints } from '../pcb-constraints/index.js';
 import type { PcbConstraintInput } from '../pcb-constraints/types.js';
@@ -11,13 +10,6 @@ import { evaluateQuoteWorkflow } from '../quote-gating/index.js';
 interface BinaryBridgeResult {
   base64?: string;
   fileName?: string;
-}
-
-interface WriteExportResult {
-  ok: boolean;
-  filePath?: string;
-  byteLength?: number;
-  error?: string;
 }
 
 function validatePdfPayload(data: unknown): string | undefined {
@@ -71,19 +63,7 @@ function writeExportPayload(
     buffer = Buffer.from(JSON.stringify(data, null, 2), 'utf-8');
   }
 
-  const artifactDir = path.resolve(ctx.config.artifactDir);
-  const target = requestedPath ? path.resolve(requestedPath) : path.resolve(artifactDir, fileName);
-  const relative = path.relative(artifactDir, target);
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
-    return { ok: false, error: 'File path must be inside the artifact directory.' };
-  }
-
-  const parentDir = path.dirname(target);
-  if (!fs.existsSync(parentDir)) {
-    fs.mkdirSync(parentDir, { recursive: true });
-  }
-  fs.writeFileSync(target, buffer);
-  return { ok: true, filePath: target, byteLength: buffer.byteLength };
+  return writeArtifactFile(ctx, buffer, requestedPath, fileName);
 }
 
 const quoteBoardSchema = z.object({
